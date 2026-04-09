@@ -71,50 +71,45 @@ async function fetchChangelog(currentVersion: string, latestVersion: string): Pr
   }
 }
 
-function extractChangelogBetween(changelog: string, from: string, to: string): string {
+function semverGt(a: [number, number, number], b: [number, number, number]): boolean {
+  if (a[0] !== b[0]) return a[0] > b[0];
+  if (a[1] !== b[1]) return a[1] > b[1];
+  return a[2] > b[2];
+}
+
+function semverLte(a: [number, number, number], b: [number, number, number]): boolean {
+  return !semverGt(a, b);
+}
+
+export function extractChangelogBetween(changelog: string, from: string, to: string): string {
   const lines = changelog.split('\n');
   const entries: string[] = [];
   let capturing = false;
+  const fromParsed = parseSemver(from);
+  if (!fromParsed) return '';
 
   for (const line of lines) {
     const versionMatch = line.match(/^## \[(\d+\.\d+\.\d+(?:\.\d+)?)\]/);
     if (versionMatch) {
-      const ver = versionMatch[1];
+      const verParsed = parseSemver(versionMatch[1]);
+      if (!verParsed) {
+        if (capturing) entries.push(line);
+        continue;
+      }
       if (!capturing) {
-        // Start capturing at the latest version (or any version newer than current)
-        const verParsed = parseSemver(ver);
-        const toParsed = parseSemver(to);
-        if (verParsed && toParsed && ver === to) {
+        // Start capturing at any version newer than current
+        if (semverGt(verParsed, fromParsed)) {
           capturing = true;
           entries.push(line);
-          continue;
-        }
-        // Also capture if this version is between from and to
-        if (verParsed && toParsed) {
-          const fromParsed = parseSemver(from);
-          if (fromParsed && (verParsed[0] > fromParsed[0] || verParsed[1] > fromParsed[1] ||
-              (verParsed[0] === fromParsed[0] && verParsed[1] === fromParsed[1] && verParsed[2] > fromParsed[2]))) {
-            capturing = true;
-            entries.push(line);
-            continue;
-          }
         }
       } else {
         // Stop capturing when we hit the current version or older
-        const verParsed = parseSemver(ver);
-        const fromParsed = parseSemver(from);
-        if (verParsed && fromParsed) {
-          if (verParsed[0] < fromParsed[0] ||
-              (verParsed[0] === fromParsed[0] && verParsed[1] < fromParsed[1]) ||
-              (verParsed[0] === fromParsed[0] && verParsed[1] === fromParsed[1] && verParsed[2] <= fromParsed[2])) {
-            break;
-          }
+        if (semverLte(verParsed, fromParsed)) {
+          break;
         }
         entries.push(line);
-        continue;
       }
-    }
-    if (capturing) {
+    } else if (capturing) {
       entries.push(line);
     }
   }

@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { parseSemver, isMinorOrMajorBump } from '../src/commands/check-update.ts';
+import { parseSemver, isMinorOrMajorBump, extractChangelogBetween } from '../src/commands/check-update.ts';
 
 describe('parseSemver', () => {
   test('parses standard version', () => {
@@ -53,6 +53,71 @@ describe('isMinorOrMajorBump', () => {
 
   test('handles v prefix on latest', () => {
     expect(isMinorOrMajorBump('0.4.0', 'v0.5.0')).toBe(true);
+  });
+});
+
+describe('extractChangelogBetween', () => {
+  const changelog = `# Changelog
+
+## [0.5.0] - 2026-05-01
+
+### Added
+- Feature X
+
+## [0.4.1] - 2026-04-15
+
+### Fixed
+- Bug Y
+
+## [0.4.0] - 2026-04-09
+
+### Added
+- Feature Z
+
+## [0.3.0] - 2026-04-08
+
+### Added
+- Feature W
+`;
+
+  test('extracts entries between 0.4.0 and 0.5.0', () => {
+    const result = extractChangelogBetween(changelog, '0.4.0', '0.5.0');
+    expect(result).toContain('Feature X');
+    expect(result).toContain('Bug Y');
+    expect(result).not.toContain('Feature Z');
+    expect(result).not.toContain('Feature W');
+  });
+
+  test('extracts only 0.5.0 when upgrading from 0.4.1', () => {
+    const result = extractChangelogBetween(changelog, '0.4.1', '0.5.0');
+    expect(result).toContain('Feature X');
+    expect(result).not.toContain('Bug Y');
+  });
+
+  test('returns empty for same version', () => {
+    const result = extractChangelogBetween(changelog, '0.5.0', '0.5.0');
+    expect(result).toBe('');
+  });
+
+  test('returns empty for malformed from version', () => {
+    const result = extractChangelogBetween(changelog, 'bad', '0.5.0');
+    expect(result).toBe('');
+  });
+
+  test('does not capture older major versions incorrectly', () => {
+    const crossMajor = `# Changelog
+
+## [2.0.0] - 2026-06-01
+### Added
+- Major 2
+
+## [0.5.0] - 2026-05-01
+### Added
+- Minor 5
+`;
+    const result = extractChangelogBetween(crossMajor, '1.2.0', '2.0.0');
+    expect(result).toContain('Major 2');
+    expect(result).not.toContain('Minor 5');
   });
 });
 
