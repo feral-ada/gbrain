@@ -48,6 +48,36 @@ automatically.
 Timeline items older than 30 days with unresolved action items.
 - Flag for review
 
+## Heartbeat Integration
+
+For production agents running on a schedule, integrate gbrain health checks into
+your operational heartbeat.
+
+### On every heartbeat (hourly or per-session)
+
+Run `gbrain doctor --json` and check for degradation. Report any failing checks
+to the user. Key signals: connection health, schema version, RLS status, embedding
+staleness.
+
+### Weekly maintenance
+
+Run `gbrain embed --stale` to refresh embeddings for pages that have changed since
+their last embedding. For large brains (>5000 pages), run this with nohup:
+```bash
+nohup gbrain embed --stale > /tmp/gbrain-embed.log 2>&1 &
+```
+
+### Daily verification
+
+Verify sync is running: check `gbrain stats` and confirm `last_sync` is within
+the last 24 hours. If sync has stopped, the brain is drifting from the repo.
+
+### Stale compiled truth detection
+
+Flag pages where compiled truth is >30 days old but the timeline has recent entries.
+This means new evidence exists that hasn't been synthesized. These pages need a
+compiled truth rewrite (see the maintain workflow above).
+
 ## Quality Rules
 
 - Never delete pages without confirmation

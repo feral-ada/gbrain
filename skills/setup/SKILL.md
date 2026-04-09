@@ -126,24 +126,50 @@ echo "=== Discovery Complete ==="
 If no markdown repos are found, create a starter brain with a few template pages
 (a person page, a company page, a concept page) from docs/GBRAIN_RECOMMENDED_SCHEMA.md.
 
-## Phase D: AGENTS.md Injection
+## Phase D: Brain-First Lookup Protocol
 
-Auto-inject gbrain instructions into the project's AGENTS.md (or equivalent):
+Inject the brain-first lookup protocol into the project's AGENTS.md (or equivalent).
+This replaces grep-based knowledge lookups with structured gbrain queries.
 
-```markdown
-<!-- gbrain:start -->
-## GBrain (Knowledge Search)
+### BEFORE (grep) vs AFTER (gbrain)
 
-GBrain indexes your knowledge base for fast search. Always search before answering
-questions about people, companies, deals, or anything in the brain.
+| Task | Before (grep) | After (gbrain) |
+|------|---------------|-----------------|
+| Find a person | `grep -r "Pedro" brain/` | `gbrain search "Pedro"` |
+| Understand a topic | `grep -rl "deal" brain/ \| head -5 && cat ...` | `gbrain query "what's the status of the deal"` |
+| Read a known page | `cat brain/people/pedro.md` | `gbrain get people/pedro` |
+| Find connections | `grep -rl "Brex" brain/ \| xargs grep "Pedro"` | `gbrain query "Pedro Brex relationship"` |
 
-### Rules
-1. **Search the brain first.** Before answering any question about people, companies,
-   deals, meetings, or strategy, search gbrain.
-2. **Never commit binaries to git.** Upload to gbrain file storage instead.
-3. **After writing to the brain repo,** sync to gbrain immediately.
-<!-- gbrain:end -->
+### Lookup sequence (MANDATORY for every entity question)
+
+1. `gbrain search "name"` -- keyword match, fast, works without embeddings
+2. `gbrain query "what do we know about name"` -- hybrid search, needs embeddings
+3. `gbrain get <slug>` -- direct page read when you know the slug from steps 1-2
+4. `grep` fallback -- only if gbrain returns zero results AND the file may exist outside the indexed brain
+
+Stop at the first step that gives you what you need. Most lookups resolve at step 1.
+
+### Sync-after-write rule
+
+After creating or updating any brain page in the repo, sync immediately so the
+index stays current:
+
+```bash
+gbrain sync --no-pull --no-embed
 ```
+
+This indexes new/changed files without pulling from git or regenerating embeddings.
+Embeddings can be refreshed later in batch (`gbrain embed --stale`).
+
+### gbrain vs memory_search
+
+| Layer | What it stores | When to use |
+|-------|---------------|-------------|
+| **gbrain** | World knowledge: people, companies, deals, meetings, concepts, media | "Who is Pedro?", "What happened at the board meeting?" |
+| **memory_search** | Agent operational state: preferences, decisions, session context | "How does the user like formatting?", "What did we decide about X?" |
+
+Both should be checked. gbrain for facts about the world. memory_search for how
+the agent should behave.
 
 ## Phase E: Health Check
 
