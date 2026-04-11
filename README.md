@@ -12,11 +12,10 @@ GBrain is designed to be installed and operated by an AI agent. If you don't hav
 
 - **[OpenClaw](https://openclaw.ai)** — Deploy [AlphaClaw on Render](https://render.com/deploy?repo=https://github.com/openclaw/alphaclaw) (one click, requires 8GB+ RAM instance)
 - **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — Deploy on [Railway using this template](https://github.com/praveen-ks-2001/hermes-agent-template) (one click)
-- **[Claude Code](https://claude.ai/code)** — Already installed? Paste the block below directly into your terminal
 
 ## Start here: paste this into your agent
 
-Copy this block into OpenClaw, Hermes Agent, or Claude Code. The agent will install GBrain, set up the brain schema, import your files, configure all integrations, and verify everything works.
+Copy this block into OpenClaw or Hermes Agent. The agent will install GBrain, set up the brain schema, import your files, configure all integrations, and verify everything works. GBrain needs a persistent agent that can run cron jobs and background sync.
 
 ```
 GOAL: I want Garry Tan's exact opinionated AI agent setup. Get me
