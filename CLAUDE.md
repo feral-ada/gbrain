@@ -1,8 +1,11 @@
 # CLAUDE.md
 
-GBrain is a personal knowledge brain. Pluggable engines: PGLite (embedded Postgres
-via WASM, zero-config default) or Postgres + pgvector + hybrid search in a managed
-Supabase instance. `gbrain init` defaults to PGLite; suggests Supabase for 1000+ files.
+GBrain is a personal knowledge brain and GStack mod for agent platforms. Pluggable
+engines: PGLite (embedded Postgres via WASM, zero-config default) or Postgres + pgvector
++ hybrid search in a managed Supabase instance. `gbrain init` defaults to PGLite;
+suggests Supabase for 1000+ files. GStack teaches agents how to code. GBrain teaches
+agents everything else: brain ops, signal detection, content ingestion, enrichment,
+cron scheduling, reports, identity, and access control.
 
 ## Architecture
 
@@ -51,6 +54,26 @@ markdown files (tool-agnostic, work with both CLI and plugin contexts).
 - `docs/designs/HOMEBREW_FOR_PERSONAL_AI.md` — 10-star vision for integration system
 - `docs/mcp/` — Per-client setup guides (Claude Desktop, Code, Cowork, Perplexity)
 - `skills/_brain-filing-rules.md` — Cross-cutting brain filing rules (referenced by all brain-writing skills)
+- `skills/RESOLVER.md` — Skill routing table (modeled on Wintermute's AGENTS.md)
+- `skills/conventions/` — Cross-cutting rules (quality, brain-first, model-routing, test-before-bulk, cross-modal)
+- `skills/_output-rules.md` — Output quality standards (deterministic links, no slop, exact phrasing)
+- `skills/signal-detector/SKILL.md` — Always-on idea+entity capture on every message
+- `skills/brain-ops/SKILL.md` — Brain-first lookup, read-enrich-write loop, source attribution
+- `skills/idea-ingest/SKILL.md` — Links/articles/tweets with author people page mandatory
+- `skills/media-ingest/SKILL.md` — Video/audio/PDF/book with entity extraction
+- `skills/meeting-ingestion/SKILL.md` — Transcripts with attendee enrichment chaining
+- `skills/citation-fixer/SKILL.md` — Citation format auditing and fixing
+- `skills/repo-architecture/SKILL.md` — Filing rules by primary subject
+- `skills/skill-creator/SKILL.md` — Create conforming skills with MECE check
+- `skills/daily-task-manager/SKILL.md` — Task lifecycle with priority levels
+- `skills/daily-task-prep/SKILL.md` — Morning prep with calendar context
+- `skills/cross-modal-review/SKILL.md` — Quality gate via second model
+- `skills/cron-scheduler/SKILL.md` — Schedule staggering, quiet hours, idempotency
+- `skills/reports/SKILL.md` — Timestamped reports with keyword routing
+- `skills/testing/SKILL.md` — Skill validation framework
+- `skills/soul-audit/SKILL.md` — 6-phase interview for SOUL.md, USER.md, ACCESS_POLICY.md, HEARTBEAT.md
+- `skills/webhook-transforms/SKILL.md` — External events to brain signals
+- `templates/` — SOUL.md, USER.md, ACCESS_POLICY.md, HEARTBEAT.md templates
 - `skills/migrations/` — Version migration files with feature_pitch YAML frontmatter
 - `src/commands/publish.ts` — Deterministic brain page publisher (code+skill pair, zero LLM calls)
 - `src/commands/backlinks.ts` — Back-link checker and fixer (enforces Iron Law)
@@ -87,7 +110,9 @@ parity), `test/cli.test.ts` (CLI structure), `test/config.test.ts` (config redac
 `test/publish.test.ts` (content stripping, encryption, password generation, HTML output),
 `test/backlinks.test.ts` (entity extraction, back-link detection, timeline entry generation),
 `test/lint.test.ts` (LLM artifact detection, code fence stripping, frontmatter validation),
-`test/report.test.ts` (report format, directory structure).
+`test/report.test.ts` (report format, directory structure),
+`test/skills-conformance.test.ts` (skill frontmatter + required sections validation),
+`test/resolver.test.ts` (RESOLVER.md coverage, routing validation).
 
 E2E tests (`test/e2e/`): Run against real Postgres+pgvector. Require `DATABASE_URL`.
 - `bun run test:e2e` runs Tier 1 (mechanical, all operations, no API keys)
@@ -143,10 +168,21 @@ stop and remove it before starting a new one.
 
 ## Skills
 
-Read the skill files in `skills/` before doing brain operations. They contain the
-workflows, heuristics, and quality rules for ingestion, querying, maintenance,
-enrichment, and setup. 7 skills: ingest, query, maintain, enrich, briefing,
-migrate, setup.
+Read the skill files in `skills/` before doing brain operations. GBrain ships 24 skills
+organized by `skills/RESOLVER.md`:
+
+**Original 8 (conformance-migrated):** ingest (thin router), query, maintain, enrich,
+briefing, migrate, setup, publish.
+
+**Brain skills (from Wintermute):** signal-detector, brain-ops, idea-ingest, media-ingest,
+meeting-ingestion, citation-fixer, repo-architecture, skill-creator, daily-task-manager.
+
+**Operational + identity:** daily-task-prep, cross-modal-review, cron-scheduler, reports,
+testing, soul-audit, webhook-transforms.
+
+**Conventions:** `skills/conventions/` has cross-cutting rules (quality, brain-first,
+model-routing, test-before-bulk, cross-modal). `skills/_brain-filing-rules.md` and
+`skills/_output-rules.md` are shared references.
 
 ## Build
 
