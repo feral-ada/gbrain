@@ -3,6 +3,7 @@ import * as db from '../core/db.ts';
 import { LATEST_VERSION } from '../core/migrate.ts';
 import { checkResolvable } from '../core/check-resolvable.ts';
 import { join } from 'path';
+import { existsSync, readFileSync, readdirSync } from 'fs';
 
 export interface Check {
   name: string;
@@ -167,7 +168,7 @@ export async function runDoctor(engine: BrainEngine | null, args: string[]) {
 function findRepoRoot(): string | null {
   let dir = process.cwd();
   for (let i = 0; i < 10; i++) {
-    if (require('fs').existsSync(join(dir, 'skills', 'RESOLVER.md'))) return dir;
+    if (existsSync(join(dir, 'skills', 'RESOLVER.md'))) return dir;
     const parent = join(dir, '..');
     if (parent === dir) break;
     dir = parent;
@@ -177,7 +178,6 @@ function findRepoRoot(): string | null {
 
 /** Quick skill conformance check — frontmatter + required sections */
 function checkSkillConformance(skillsDir: string): Check {
-  const { existsSync, readFileSync, readdirSync } = require('fs');
   const manifestPath = join(skillsDir, 'manifest.json');
   if (!existsSync(manifestPath)) {
     return { name: 'skill_conformance', status: 'warn', message: 'manifest.json not found' };
