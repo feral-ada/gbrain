@@ -18,11 +18,11 @@ for (const op of operations) {
 }
 
 // CLI-only commands that bypass the operation layer
-const CLI_ONLY = new Set(['init', 'upgrade', 'check-update', 'integrations', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate']);
+const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'features', 'autopilot']);
 
 async function main() {
   const args = process.argv.slice(2);
-  const command = args[0];
+  let command = args[0];
 
   if (!command || command === '--help' || command === '-h') {
     printHelp();
@@ -41,6 +41,11 @@ async function main() {
   }
 
   const subArgs = args.slice(1);
+
+  // DX alias: `ask` is a natural-language alias for `query`
+  if (command === 'ask') {
+    command = 'query';
+  }
 
   // Per-command --help
   if (subArgs.includes('--help') || subArgs.includes('-h')) {
@@ -122,7 +127,13 @@ function parseOpArgs(op: Operation, args: string[]): Record<string, unknown> {
 
   // Read stdin for content params
   if (op.cliHints?.stdin && !params[op.cliHints.stdin] && !process.stdin.isTTY) {
-    params[op.cliHints.stdin] = readFileSync('/dev/stdin', 'utf-8');
+    const stdinContent = readFileSync('/dev/stdin', 'utf-8');
+    const MAX_STDIN = 5_000_000; // 5MB
+    if (Buffer.byteLength(stdinContent, 'utf-8') > MAX_STDIN) {
+      console.error(`Error: stdin content exceeds ${MAX_STDIN} bytes. Split into smaller inputs.`);
+      process.exit(1);
+    }
+    params[op.cliHints.stdin] = stdinContent;
   }
 
   return params;
@@ -232,6 +243,11 @@ async function handleCliOnly(command: string, args: string[]) {
     await runUpgrade(args);
     return;
   }
+  if (command === 'post-upgrade') {
+    const { runPostUpgrade } = await import('./commands/upgrade.ts');
+    runPostUpgrade();
+    return;
+  }
   if (command === 'check-update') {
     const { runCheckUpdate } = await import('./commands/check-update.ts');
     await runCheckUpdate(args);
@@ -240,6 +256,44 @@ async function handleCliOnly(command: string, args: string[]) {
   if (command === 'integrations') {
     const { runIntegrations } = await import('./commands/integrations.ts');
     await runIntegrations(args);
+    return;
+  }
+  if (command === 'publish') {
+    const { runPublish } = await import('./commands/publish.ts');
+    await runPublish(args);
+    return;
+  }
+  if (command === 'check-backlinks') {
+    const { runBacklinks } = await import('./commands/backlinks.ts');
+    await runBacklinks(args);
+    return;
+  }
+  if (command === 'lint') {
+    const { runLint } = await import('./commands/lint.ts');
+    await runLint(args);
+    return;
+  }
+  if (command === 'report') {
+    const { runReport } = await import('./commands/report.ts');
+    await runReport(args);
+    return;
+  }
+  if (command === 'doctor') {
+    // Doctor runs filesystem checks first (no DB needed), then DB checks.
+    // --fast skips DB checks entirely.
+    const { runDoctor } = await import('./commands/doctor.ts');
+    if (args.includes('--fast')) {
+      await runDoctor(null, args);
+    } else {
+      try {
+        const eng = await connectEngine();
+        await runDoctor(eng, args);
+        await eng.disconnect();
+      } catch {
+        // DB unavailable — still run filesystem checks
+        await runDoctor(null, args);
+      }
+    }
     return;
   }
 
@@ -282,15 +336,36 @@ async function handleCliOnly(command: string, args: string[]) {
         await runConfig(engine, args);
         break;
       }
-      case 'doctor': {
-        const { runDoctor } = await import('./commands/doctor.ts');
-        await runDoctor(engine, args);
-        break;
-      }
+      // doctor is handled before connectEngine() above
       case 'migrate': {
         const { runMigrateEngine } = await import('./commands/migrate-engine.ts');
         await runMigrateEngine(engine, args);
         break;
+      }
+      case 'eval': {
+        const { runEvalCommand } = await import('./commands/eval.ts');
+        await runEvalCommand(engine, args);
+        break;
+      }
+      case 'sync': {
+        const { runSync } = await import('./commands/sync.ts');
+        await runSync(engine, args);
+        break;
+      }
+      case 'extract': {
+        const { runExtract } = await import('./commands/extract.ts');
+        await runExtract(engine, args);
+        break;
+      }
+      case 'features': {
+        const { runFeatures } = await import('./commands/features.ts');
+        await runFeatures(engine, args);
+        break;
+      }
+      case 'autopilot': {
+        const { runAutopilot } = await import('./commands/autopilot.ts');
+        await runAutopilot(engine, args);
+        return; // autopilot doesn't disconnect (long-running)
       }
     }
   } finally {
@@ -342,7 +417,7 @@ SETUP
   migrate --to <supabase|pglite>     Transfer brain between engines
   upgrade                            Self-update
   check-update [--json]              Check for new versions
-  doctor [--json]                    Health check (pgvector, RLS, schema, embeddings)
+  doctor [--json] [--fast]            Health check (resolver, skills, pgvector, RLS, embeddings)
   integrations [subcommand]          Manage integration recipes (senses + reflexes)
 
 PAGES
@@ -354,15 +429,20 @@ PAGES
 SEARCH
   search <query>                     Keyword search (tsvector)
   query <question> [--no-expand]     Hybrid search (RRF + expansion)
+  ask <question> [--no-expand]       Alias for query
 
 IMPORT/EXPORT
   import <dir> [--no-embed]          Import markdown directory
   sync [--repo <path>] [flags]       Git-to-brain incremental sync
+  sync --watch [--interval N]        Continuous sync (loops until stopped)
+  sync --install-cron                Install persistent sync daemon
   export [--dir ./out/]              Export to markdown
 
 FILES
   files list [slug]                  List stored files
   files upload <file> --page <slug>  Upload file to storage
+  files upload-raw <file> --page <s> Smart upload (size routing + .redirect.yaml)
+  files signed-url <path>            Generate signed URL (1-hour)
   files sync <dir>                   Bulk upload directory
   files verify                       Verify all uploads
 
@@ -384,11 +464,20 @@ TIMELINE
   timeline [<slug>]                  View timeline
   timeline-add <slug> <date> <text>  Add timeline entry
 
+TOOLS
+  extract <links|timeline|all> [dir] Extract links/timeline from markdown into DB
+  publish <page.md> [--password]     Shareable HTML (strips private data, optional AES-256)
+  check-backlinks <check|fix> [dir]  Find/fix missing back-links across brain
+  lint <dir|file> [--fix]            Catch LLM artifacts, placeholder dates, bad frontmatter
+  report --type <name> --content ... Save timestamped report to brain/reports/
+
 ADMIN
   stats                              Brain statistics
   health                             Brain health dashboard
   history <slug>                     Page version history
   revert <slug> <version-id>         Revert to version
+  features [--json] [--auto-fix]     Scan usage + recommend unused features
+  autopilot [--repo] [--interval N]  Self-maintaining brain daemon
   config [show|get|set] <key> [val]  Brain config
   serve                              MCP server (stdio)
   serve --http [--port N]            HTTP MCP server with OAuth 2.1

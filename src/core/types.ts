@@ -60,14 +60,18 @@ export interface SearchResult {
   type: PageType;
   chunk_text: string;
   chunk_source: 'compiled_truth' | 'timeline';
+  chunk_id: number;
+  chunk_index: number;
   score: number;
   stale: boolean;
 }
 
 export interface SearchOpts {
   limit?: number;
+  offset?: number;
   type?: PageType;
   exclude_slugs?: string[];
+  detail?: 'low' | 'medium' | 'high';
 }
 
 // Links
@@ -144,6 +148,7 @@ export interface BrainHealth {
   orphan_pages: number;
   dead_links: number;
   missing_embeddings: number;
+  brain_score: number;
 }
 
 // Ingest log

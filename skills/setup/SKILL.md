@@ -1,6 +1,29 @@
+---
+name: setup
+description: Set up GBrain with auto-provision Supabase or PGLite, AGENTS.md injection, first import
+triggers:
+  - "set up gbrain"
+  - "initialize brain"
+  - "gbrain setup"
+tools:
+  - get_stats
+  - get_health
+  - sync_brain
+  - put_page
+mutating: true
+---
+
 # Setup GBrain
 
 Set up GBrain from scratch. Target: working brain in under 5 minutes.
+
+## Contract
+
+- Setup completes with a working brain verified by `gbrain doctor --json` (all checks OK).
+- The brain-first lookup protocol is injected into the project's AGENTS.md or equivalent.
+- Live sync is configured and verified (a test change pushed and found via search).
+- Schema state is tracked in `~/.gbrain/update-state.json` so future upgrades know what the user adopted or declined.
+- No Supabase anon key is requested; GBrain uses only the database connection string.
 
 ## Install (if not already installed)
 
@@ -123,6 +146,24 @@ echo "=== Discovery Complete ==="
    images, PDFs, audio):
    > "You have N binary files (X GB) in your brain repo. Want to move them to cloud
    > storage? Your git repo will drop from X GB to Y MB. All links keep working."
+
+   If the user agrees, configure storage and run migration:
+   ```bash
+   # Configure storage backend (Supabase Storage recommended)
+   gbrain config set storage.backend supabase
+   gbrain config set storage.bucket brain-files
+   gbrain config set storage.projectUrl <supabase-url>
+   gbrain config set storage.serviceRoleKey <service-role-key>
+
+   # Migrate binary files to cloud (3-step lifecycle)
+   gbrain files mirror <brain-dir>       # Upload to cloud, keep local
+   gbrain files redirect <brain-dir>     # Replace local with .redirect.yaml pointers
+   # (optional) gbrain files clean <brain-dir> --yes   # Remove pointers too
+   ```
+
+   After migration, `gbrain files upload-raw` handles new files automatically:
+   small text/PDFs stay in git, large/media files go to cloud with `.redirect.yaml`
+   pointers. Files >= 100 MB use TUS resumable upload for reliability.
 
 If no markdown repos are found, create a starter brain with a few template pages
 (a person page, a company page, a concept page) from docs/GBRAIN_RECOMMENDED_SCHEMA.md.
@@ -286,6 +327,33 @@ ones to create, write `~/.gbrain/update-state.json` recording:
 
 This file enables future upgrades to suggest new schema additions without
 re-suggesting things the user already declined.
+
+## Anti-Patterns
+
+- **Asking for the Supabase anon key.** GBrain connects directly to Postgres over the wire protocol, not through the REST API. Only the database connection string is needed.
+- **Skipping live sync setup.** If sync doesn't run automatically, the vector DB falls behind and search returns stale answers. Phase H is not optional.
+- **Declaring setup complete without verification.** "The command ran" is not the same as "it worked." Push a test change, wait for sync, search for the corrected text.
+- **Using Transaction mode pooler.** Sync uses transactions on every import. Transaction mode pooler causes `.begin() is not a function` errors and silently skips pages. Always use Session mode (port 6543).
+- **Importing without proving search.** The magical moment is the user seeing search find things grep couldn't. Don't skip it.
+
+## Output Format
+
+```
+GBRAIN SETUP COMPLETE
+=====================
+
+Engine: [PGLite / Supabase Postgres]
+Connection: [verified / pooler mode confirmed]
+Pages imported: N
+Embeddings: N/N (keyword search active, semantic improving)
+Live sync: [configured / method]
+Health check: all OK / [specific failures]
+Verification: [GBRAIN_VERIFY.md results]
+
+Next steps:
+- Read docs/GBRAIN_SKILLPACK.md for production agent patterns
+- [any pending items]
+```
 
 ## Tools Used
 

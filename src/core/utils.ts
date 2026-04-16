@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'crypto';
-import type { Page, PageType, Chunk, SearchResult } from './types.ts';
+import type { Page, PageInput, PageType, Chunk, SearchResult } from './types.ts';
 
 /**
  * SHA-256 hash a token/secret for storage. Never store plaintext tokens.
@@ -27,10 +27,19 @@ export function validateSlug(slug: string): string {
 }
 
 /**
- * SHA-256 hash of compiled_truth + timeline, used for import idempotency.
+ * SHA-256 hash of page content, used for import idempotency.
+ * Hashes all PageInput fields to match importFromContent's hash algorithm.
  */
-export function contentHash(compiledTruth: string, timeline: string): string {
-  return createHash('sha256').update(compiledTruth + '\n---\n' + timeline).digest('hex');
+export function contentHash(page: PageInput): string {
+  return createHash('sha256')
+    .update(JSON.stringify({
+      title: page.title,
+      type: page.type,
+      compiled_truth: page.compiled_truth,
+      timeline: page.timeline || '',
+      frontmatter: page.frontmatter || {},
+    }))
+    .digest('hex');
 }
 
 export function rowToPage(row: Record<string, unknown>): Page {
@@ -70,6 +79,8 @@ export function rowToSearchResult(row: Record<string, unknown>): SearchResult {
     type: row.type as PageType,
     chunk_text: row.chunk_text as string,
     chunk_source: row.chunk_source as 'compiled_truth' | 'timeline',
+    chunk_id: row.chunk_id as number,
+    chunk_index: row.chunk_index as number,
     score: Number(row.score),
     stale: Boolean(row.stale),
   };

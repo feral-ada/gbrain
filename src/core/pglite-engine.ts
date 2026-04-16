@@ -3,8 +3,10 @@ import { vector } from '@electric-sql/pglite/vector';
 import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm';
 import type { Transaction } from '@electric-sql/pglite';
 import type { BrainEngine } from './engine.ts';
+import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
 import { runMigrations } from './migrate.ts';
 import { PGLITE_SCHEMA_SQL } from './pglite-schema.ts';
+import { acquireLock, releaseLock, type LockHandle } from './pglite-lock.ts';
 import type {
   Page, PageInput, PageFilters, PageType,
   Chunk, ChunkInput,
@@ -23,6 +25,7 @@ type PGLiteDB = PGlite;
 
 export class PGLiteEngine implements BrainEngine {
   private _db: PGLiteDB | null = null;
+  private _lock: LockHandle | null = null;
 
   get db(): PGLiteDB {
     if (!this._db) throw new Error('PGLite not connected. Call connect() first.');
@@ -32,6 +35,14 @@ export class PGLiteEngine implements BrainEngine {
   // Lifecycle
   async connect(config: EngineConfig): Promise<void> {
     const dataDir = config.database_path || undefined; // undefined = in-memory
+
+    // Acquire file lock to prevent concurrent PGLite access (crashes with Aborted())
+    this._lock = await acquireLock(dataDir);
+
+    if (!this._lock.acquired) {
+      throw new Error('Could not acquire PGLite lock. Another gbrain process is using the database.');
+    }
+
     this._db = await PGlite.create({
       dataDir,
       extensions: { vector, pg_trgm },
@@ -42,6 +53,10 @@ export class PGLiteEngine implements BrainEngine {
     if (this._db) {
       await this._db.close();
       this._db = null;
+    }
+    if (this._lock?.acquired) {
+      await releaseLock(this._lock);
+      this._lock = null;
     }
   }
 
@@ -156,53 +171,80 @@ export class PGLiteEngine implements BrainEngine {
 
   // Search
   async searchKeyword(query: string, opts?: SearchOpts): Promise<SearchResult[]> {
-    const limit = opts?.limit || 20;
+    const limit = clampSearchLimit(opts?.limit);
+    const offset = opts?.offset || 0;
+    const detailFilter = opts?.detail === 'low' ? `AND cc.chunk_source = 'compiled_truth'` : '';
+
+    if (opts?.limit && opts.limit > MAX_SEARCH_LIMIT) {
+      console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
+    }
 
     const { rows } = await this.db.query(
-      `SELECT DISTINCT ON (p.slug)
+      `SELECT
         p.slug, p.id as page_id, p.title, p.type,
-        cc.chunk_text, cc.chunk_source,
+        cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
         ts_rank(p.search_vector, websearch_to_tsquery('english', $1)) AS score,
         CASE WHEN p.updated_at < (
           SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id
         ) THEN true ELSE false END AS stale
       FROM pages p
       JOIN content_chunks cc ON cc.page_id = p.id
-      WHERE p.search_vector @@ websearch_to_tsquery('english', $1)
-      ORDER BY p.slug, score DESC`,
-      [query]
+      WHERE p.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter}
+      ORDER BY score DESC
+      LIMIT $2
+      OFFSET $3`,
+      [query, limit, offset]
     );
 
-    // Re-sort by score (DISTINCT ON requires ORDER BY slug first) and apply limit
-    const sorted = (rows as Record<string, unknown>[]).sort(
-      (a: any, b: any) => b.score - a.score
-    );
-    sorted.splice(limit);
-
-    return sorted.map(rowToSearchResult);
+    return (rows as Record<string, unknown>[]).map(rowToSearchResult);
   }
 
   async searchVector(embedding: Float32Array, opts?: SearchOpts): Promise<SearchResult[]> {
-    const limit = opts?.limit || 20;
+    const limit = clampSearchLimit(opts?.limit);
+    const offset = opts?.offset || 0;
     const vecStr = '[' + Array.from(embedding).join(',') + ']';
+    const detailFilter = opts?.detail === 'low' ? `AND cc.chunk_source = 'compiled_truth'` : '';
+
+    if (opts?.limit && opts.limit > MAX_SEARCH_LIMIT) {
+      console.warn(`[gbrain] Warning: search limit clamped from ${opts.limit} to ${MAX_SEARCH_LIMIT}`);
+    }
 
     const { rows } = await this.db.query(
       `SELECT
         p.slug, p.id as page_id, p.title, p.type,
-        cc.chunk_text, cc.chunk_source,
+        cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
         1 - (cc.embedding <=> $1::vector) AS score,
         CASE WHEN p.updated_at < (
           SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id
         ) THEN true ELSE false END AS stale
       FROM content_chunks cc
       JOIN pages p ON p.id = cc.page_id
-      WHERE cc.embedding IS NOT NULL
+      WHERE cc.embedding IS NOT NULL ${detailFilter}
       ORDER BY cc.embedding <=> $1::vector
-      LIMIT $2`,
-      [vecStr, limit]
+      LIMIT $2
+      OFFSET $3`,
+      [vecStr, limit, offset]
     );
 
     return (rows as Record<string, unknown>[]).map(rowToSearchResult);
+  }
+
+  async getEmbeddingsByChunkIds(ids: number[]): Promise<Map<number, Float32Array>> {
+    if (ids.length === 0) return new Map();
+    const { rows } = await this.db.query(
+      `SELECT id, embedding FROM content_chunks WHERE id = ANY($1::int[]) AND embedding IS NOT NULL`,
+      [ids]
+    );
+    const result = new Map<number, Float32Array>();
+    for (const row of rows as Record<string, unknown>[]) {
+      if (row.embedding) {
+        const emb = typeof row.embedding === 'string'
+          ? new Float32Array(JSON.parse(row.embedding))
+          : row.embedding as Float32Array;
+        result.set(row.id as number, emb);
+      }
+    }
+    return result;
   }
 
   // Chunks
@@ -250,7 +292,7 @@ export class PGLiteEngine implements BrainEngine {
        ON CONFLICT (page_id, chunk_index) DO UPDATE SET
          chunk_text = EXCLUDED.chunk_text,
          chunk_source = EXCLUDED.chunk_source,
-         embedding = COALESCE(EXCLUDED.embedding, content_chunks.embedding),
+         embedding = CASE WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.embedding ELSE COALESCE(EXCLUDED.embedding, content_chunks.embedding) END,
          model = COALESCE(EXCLUDED.model, content_chunks.model),
          token_count = EXCLUDED.token_count,
          embedded_at = COALESCE(EXCLUDED.embedded_at, content_chunks.embedded_at)`,
@@ -543,21 +585,41 @@ export class PGLiteEngine implements BrainEngine {
         ) as stale_pages,
         (SELECT count(*) FROM pages p
          WHERE NOT EXISTS (SELECT 1 FROM links l WHERE l.to_page_id = p.id)
+           AND NOT EXISTS (SELECT 1 FROM links l WHERE l.from_page_id = p.id)
         ) as orphan_pages,
         (SELECT count(*) FROM links l
          WHERE NOT EXISTS (SELECT 1 FROM pages p WHERE p.id = l.to_page_id)
         ) as dead_links,
-        (SELECT count(*) FROM content_chunks WHERE embedded_at IS NULL) as missing_embeddings
+        (SELECT count(*) FROM content_chunks WHERE embedded_at IS NULL) as missing_embeddings,
+        (SELECT count(*) FROM links) as link_count,
+        (SELECT count(DISTINCT page_id) FROM timeline_entries) as pages_with_timeline
     `);
 
     const r = h as Record<string, unknown>;
+    const pageCount = Number(r.page_count);
+    const embedCoverage = Number(r.embed_coverage);
+    const orphanPages = Number(r.orphan_pages);
+    const deadLinks = Number(r.dead_links);
+    const linkCount = Number(r.link_count);
+    const pagesWithTimeline = Number(r.pages_with_timeline);
+
+    const linkDensity = pageCount > 0 ? Math.min(linkCount / pageCount, 1) : 0;
+    const timelineCoverage = pageCount > 0 ? Math.min(pagesWithTimeline / pageCount, 1) : 0;
+    const noOrphans = pageCount > 0 ? 1 - (orphanPages / pageCount) : 1;
+    const noDeadLinks = pageCount > 0 ? 1 - Math.min(deadLinks / pageCount, 1) : 1;
+    const brainScore = pageCount === 0 ? 0 : Math.round(
+      (embedCoverage * 0.35 + linkDensity * 0.25 + timelineCoverage * 0.15 +
+       noOrphans * 0.15 + noDeadLinks * 0.10) * 100
+    );
+
     return {
-      page_count: Number(r.page_count),
-      embed_coverage: Number(r.embed_coverage),
+      page_count: pageCount,
+      embed_coverage: embedCoverage,
       stale_pages: Number(r.stale_pages),
-      orphan_pages: Number(r.orphan_pages),
-      dead_links: Number(r.dead_links),
+      orphan_pages: orphanPages,
+      dead_links: deadLinks,
       missing_embeddings: Number(r.missing_embeddings),
+      brain_score: brainScore,
     };
   }
 
