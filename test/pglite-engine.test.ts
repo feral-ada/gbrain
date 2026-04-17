@@ -768,14 +768,14 @@ describe('PGLiteEngine: getHealth graph metrics', () => {
     expect(h.most_connected[0].link_count).toBe(2);
   });
 
-  test('orphan_pages aligned to "no inbound links" definition', async () => {
-    // All 3 pages start with no inbound links. Expect 3 orphans.
+  test('orphan_pages: pages with neither inbound nor outbound links', async () => {
+    // All 3 pages start with no links. Expect 3 orphans.
     const h = await engine.getHealth();
     expect(h.orphan_pages).toBe(3);
 
-    // Add inbound to acme. 2 orphans remain (Alice, Bob).
+    // Add alice -> acme. Alice has outbound, acme has inbound, only Bob is orphan.
     await engine.addLink('people/alice', 'companies/acme', '', 'works_at');
     const h2 = await engine.getHealth();
-    expect(h2.orphan_pages).toBe(2);
+    expect(h2.orphan_pages).toBe(1);
   });
 });
