@@ -142,6 +142,6 @@ Then read `~/gbrain/skills/migrations/v<NEW_VERSION>.md` (and any intermediate
 versions you skipped) and run any backfill or verification steps it lists. Skipping
 this is how features ship in the binary but stay dormant in the user's brain.
 
-For v0.10.3+ specifically: if your brain was created before v0.10.3, run
+For v0.12.0+ specifically: if your brain was created before v0.12.0, run
 `gbrain extract links --source db && gbrain extract timeline --source db` to
 backfill the new graph layer (see Step 4.5 above).

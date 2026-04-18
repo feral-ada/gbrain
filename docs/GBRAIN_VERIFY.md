@@ -185,7 +185,7 @@ system context. See `skills/setup/SKILL.md` Phase D.
 
 ## 7. Knowledge Graph Wired
 
-The v0.10.3 graph layer needs to be populated for existing brains. New writes are
+The v0.12.0 graph layer needs to be populated for existing brains. New writes are
 auto-linked, but historical pages need a one-time backfill.
 
 **Command:**

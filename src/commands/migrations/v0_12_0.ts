@@ -1,11 +1,11 @@
 /**
- * v0.11.2 migration orchestrator — Knowledge Graph auto-wire.
+ * v0.12.0 migration orchestrator — Knowledge Graph auto-wire.
  *
- * Ensures the v0.11.2 graph layer is fully wired up on every install:
+ * Ensures the v0.12.0 graph layer is fully wired up on every install:
  * schema migrations applied (v8/v9/v10), auto-link enabled, links and
  * timeline backfilled from existing pages, wire-up verified.
  *
- * The whole point of v0.11.2 is "the brain wires itself" — every page
+ * The whole point of v0.12.0 is "the brain wires itself" — every page
  * write extracts entity references and creates typed links. This
  * orchestrator turns that promise into a verified install state.
  *
@@ -177,7 +177,7 @@ function phaseEVerify(opts: OrchestratorOpts, autoLinkDisabled: boolean): Orches
 
 async function orchestrator(opts: OrchestratorOpts): Promise<OrchestratorResult> {
   console.log('');
-  console.log('=== v0.11.2 — Knowledge Graph auto-wire ===');
+  console.log('=== v0.12.0 — Knowledge Graph auto-wire ===');
   if (opts.dryRun) console.log('  (dry-run; no side effects)');
   console.log('');
 
@@ -224,20 +224,20 @@ async function orchestrator(opts: OrchestratorOpts): Promise<OrchestratorResult>
 function finalizeResult(phases: OrchestratorPhaseResult[], status: 'complete' | 'partial' | 'failed'): OrchestratorResult {
   if (status !== 'failed') {
     try {
-      appendCompletedMigration({ version: '0.11.2', status: status as 'complete' | 'partial' });
+      appendCompletedMigration({ version: '0.12.0', status: status as 'complete' | 'partial' });
     } catch {
       // Recording is best-effort.
     }
   }
   return {
-    version: '0.11.2',
+    version: '0.12.0',
     status,
     phases,
   };
 }
 
-export const v0_11_2: Migration = {
-  version: '0.11.2',
+export const v0_12_0: Migration = {
+  version: '0.12.0',
   featurePitch: {
     headline: 'Knowledge Graph wires itself — every page write extracts typed links automatically',
     description:

@@ -2,9 +2,13 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.11.2] - 2026-04-18
+## [0.12.0] - 2026-04-18
 
-### Knowledge Graph Layer (PR #188 — originally tracked as v0.10.3, merged on top of v0.11.1 Minions)
+### Knowledge Graph Layer (PR #188 — graph features + merged Minions runtime)
+
+The brain wires itself. Every page write extracts entity references and creates typed links automatically. This release bundles the v0.10.3 graph layer work on top of the v0.11.1 Minions runtime, plus an idempotent v0.12.0 auto-wire orchestrator that ensures every install ends up with a populated, queryable graph.
+
+
 
 Your brain now wires itself. Every page write automatically extracts entity references and creates typed links between pages. The `links` table goes from a manually-populated convention to a real, queryable knowledge graph that compounds over time.
 

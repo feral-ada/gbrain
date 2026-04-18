@@ -14,7 +14,7 @@ Cross-reference against your fork's local skill files.
 `gbrain upgrade` ships the new binary. `gbrain post-upgrade [--execute --yes]` runs
 the schema migrations and backfills the data. But the **skill files themselves**
 that tell the agent how to behave — those are user-owned. If your `~/git/wintermute/workspace/skills/brain-ops/SKILL.md`
-says `# Based on gbrain v0.10.0` at the top, it doesn't know about v0.10.3 features.
+says `# Based on gbrain v0.10.0` at the top, it doesn't know about v0.12.0 features.
 
 The agent will keep manually calling `gbrain link` after every `put_page` (now redundant —
 auto-link does it), miss out on `gbrain graph-query` for relationship questions, and
@@ -25,7 +25,7 @@ not know to backfill the structured timeline.
 1. Identify your forked skill files. For Wintermute: `~/git/wintermute/workspace/skills/`.
 2. For each skill listed below, find the matching phase/section in your fork.
 3. Apply the diff (paste the new block in the indicated location).
-4. Update the version banner at the top of your fork (`# Based on gbrain v0.10.3`).
+4. Update the version banner at the top of your fork (`# Based on gbrain v0.12.0`).
 5. Verify: ask the agent to write a test page and confirm the response includes
    `auto_links: { created, removed, errors }`.
 
@@ -63,7 +63,7 @@ to the graph (`links` table) with inferred relationship types. Stale links
 on every brain write (Iron Law)" without qualification, append:
 
 ```markdown
-**v0.10.3 update:** Auto-link satisfies the Iron Law for entity-reference links
+**v0.12.0 update:** Auto-link satisfies the Iron Law for entity-reference links
 on every `put_page`. The agent's Iron Law obligation is now: include the
 entity reference in the page content (e.g., `[Alice](people/alice)`); auto-link
 handles the structured row. Manual `add_link` calls are reserved for
@@ -80,7 +80,7 @@ relationships you can't express in markdown content.
 when the meeting page references attendees as `[Name](people/slug)`).
 
 ```markdown
-**Note (v0.10.3):** Once the meeting page is written via `gbrain put`, the
+**Note (v0.12.0):** Once the meeting page is written via `gbrain put`, the
 auto-link post-hook automatically creates `attended` links from the meeting
 to each attendee whose page is referenced as `[Name](people/slug)`. You don't
 need to call `gbrain link` for attendees. You DO still need `gbrain timeline-add`
@@ -107,7 +107,7 @@ to meeting page" can be replaced with:
 originals/ideas pages that reference people or companies.
 
 ```markdown
-**Auto-link (v0.10.3):** When you write/update an originals or ideas page that
+**Auto-link (v0.12.0):** When you write/update an originals or ideas page that
 references a person or company, the auto-link post-hook on `put_page`
 automatically creates the link from the new page to that entity. You don't
 need to call `gbrain link` manually. Timeline entries still need explicit calls.
@@ -117,7 +117,7 @@ need to call `gbrain link` manually. Timeline entries still need explicit calls.
 
 ## 4. enrich/SKILL.md
 
-**Where:** Replace `### Step 7: Cross-reference` with the v0.10.3 version.
+**Where:** Replace `### Step 7: Cross-reference` with the v0.12.0 version.
 
 **Why:** Step 7 used to be primarily about creating links between related entity
 pages. With auto-link, that's automatic. Step 7 is now about content updates,
@@ -141,7 +141,7 @@ New (paste):
 - Update related project/deal pages if relevant context surfaced
 - Check index files if the brain uses them
 
-**Note (v0.10.3):** Links between brain pages are auto-created on every
+**Note (v0.12.0):** Links between brain pages are auto-created on every
 `put_page` call (auto-link post-hook). Step 7 focuses on content
 cross-references (updating related pages' compiled truth with new signal
 from this enrichment), not on creating links. Verify via the `auto_links`
@@ -155,15 +155,17 @@ Timeline entries still need explicit `gbrain timeline-add` calls.
 
 1. **Bump the version banner** at the top of each forked file:
    ```
-   # Based on gbrain v0.10.3 skills/<skill-name>, extended with Wintermute-specific config
+   # Based on gbrain v0.12.0 skills/<skill-name>, extended with Wintermute-specific config
    ```
 
-2. **Run the v0.10.3 backfill** (this populates the graph for your existing brain):
+2. **Run the v0.12.0 backfill** (this populates the graph for your existing brain):
    ```bash
-   gbrain post-upgrade --execute --yes
+   gbrain post-upgrade
    ```
-   This runs `gbrain init` (schema migrations), `gbrain extract links --source db`,
-   `gbrain extract timeline --source db`, and `gbrain stats`.
+   The v0.12.0 release wires post-upgrade to call `apply-migrations --yes`
+   automatically, which runs the v0_12_0 orchestrator (schema → config check →
+   `extract links --source db` → `extract timeline --source db` → verify).
+   Idempotent; cheap when nothing is pending.
 
 3. **Verify auto-link works:** ask the agent to write a test page that references
    `[Some Person](people/some-person)`. Confirm the put_page response includes
@@ -178,8 +180,8 @@ Timeline entries still need explicit `gbrain timeline-add` calls.
 ## Future versions
 
 When gbrain ships a new version, this doc will be updated with the diffs for that
-version. Watch the `## v0.10.X` sections below — each new version appends a section,
-old sections stay so you can catch up multiple versions at once.
+version. Each new version appends a section; old sections stay so you can catch up
+multiple versions at once.
 
 To check what your fork is missing:
 ```bash

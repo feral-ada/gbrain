@@ -73,7 +73,7 @@ describe('detectInstallMethod heuristic (source analysis)', () => {
   });
 });
 
-describe('post-upgrade behavior (post v0.11.2 merge)', () => {
+describe('post-upgrade behavior (post v0.12.0 merge)', () => {
   // The earlier --execute / --yes / auto_execute tests were removed when the
   // master merge replaced the markdown-driven runPostUpgrade with the TS
   // migration registry + apply-migrations orchestrator. The new contract:

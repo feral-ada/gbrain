@@ -50,7 +50,7 @@ strict behavior when unset.
 - `src/core/data-research.ts` — Recipe validation, field extraction (MRR/ARR regex), dedup, tracker parsing, HTML stripping
 - `src/commands/extract.ts` — `gbrain extract links|timeline|all [--source fs|db]`: batch link/timeline extraction. fs walks markdown files, db walks pages from the engine (mutation-immune snapshot iteration; use this for live brains with no local checkout)
 - `src/commands/graph-query.ts` — `gbrain graph-query <slug> [--type T] [--depth N] [--direction in|out|both]`: typed-edge relationship traversal (renders indented tree)
-- `src/core/link-extraction.ts` — shared library for the v0.11.2 graph layer. extractEntityRefs (canonical, replaces backlinks.ts duplicate), extractPageLinks, inferLinkType heuristics (attended/works_at/invested_in/founded/advises/source/mentions), parseTimelineEntries, isAutoLinkEnabled config helper. Used by extract.ts, operations.ts auto-link post-hook, and backlinks.ts.
+- `src/core/link-extraction.ts` — shared library for the v0.12.0 graph layer. extractEntityRefs (canonical, replaces backlinks.ts duplicate), extractPageLinks, inferLinkType heuristics (attended/works_at/invested_in/founded/advises/source/mentions), parseTimelineEntries, isAutoLinkEnabled config helper. Used by extract.ts, operations.ts auto-link post-hook, and backlinks.ts.
 - `src/core/minions/` — Minions job queue: BullMQ-inspired, Postgres-native (queue, worker, backoff, types)
 - `src/core/minions/queue.ts` — MinionQueue class (submit, claim, complete, fail, stall detection, parent-child, depth/child-cap, per-job timeouts, cascade-kill, attachments, idempotency keys, child_done inbox, removeOnComplete/Fail)
 - `src/core/minions/worker.ts` — MinionWorker class (handler registry, lock renewal, graceful shutdown, timeout safety net)
@@ -60,7 +60,8 @@ strict behavior when unset.
 - `src/commands/autopilot.ts` — `gbrain autopilot --install`: self-maintaining brain daemon (sync+extract+embed)
 - `src/mcp/server.ts` — MCP stdio server (generated from operations)
 - `src/commands/auth.ts` — Standalone token management (create/list/revoke/test)
-- `src/commands/upgrade.ts` — Self-update CLI with post-upgrade feature discovery + features hook. `runPostUpgrade(args)` now prints the full migration body (not just frontmatter headline) and supports `--execute [--yes]` to run commands declared in a migration file's `auto_execute:` frontmatter list.
+- `src/commands/upgrade.ts` — Self-update CLI. `runPostUpgrade()` enumerates migrations from the TS registry (src/commands/migrations/index.ts) and tail-calls `runApplyMigrations(['--yes', '--non-interactive'])` so the mechanical side of every outstanding migration runs unconditionally.
+- `src/commands/migrations/` — TS migration registry (compiled into the binary; no filesystem walk of `skills/migrations/*.md` needed at runtime). `index.ts` lists migrations in semver order. `v0_11_0.ts` = Minions adoption orchestrator (8 phases). `v0_12_0.ts` = Knowledge Graph auto-wire orchestrator (5 phases: schema → config check → backfill links → backfill timeline → verify). All orchestrators are idempotent and resumable from `partial` status.
 - `docs/UPGRADING_DOWNSTREAM_AGENTS.md` — Patches for downstream agent skill forks (Wintermute etc.) to apply when upgrading. Each release appends a new section. v0.10.3 includes diffs for brain-ops, meeting-ingestion, signal-detector, enrich.
 - `src/core/schema-embedded.ts` — AUTO-GENERATED from schema.sql (run `bun run build:schema`)
 - `src/schema.sql` — Full Postgres + pgvector DDL (source of truth, generates schema-embedded.ts)
@@ -130,7 +131,7 @@ Key commands added for Minions (job queue):
 
 ## Testing
 
-`bun test` runs all tests. After the v0.11.2 merge: ~58 unit test files + 8 E2E test files. Unit tests run
+`bun test` runs all tests. After the v0.12.0 release: ~74 unit test files + 8 E2E test files (1297 unit pass, 38 expected E2E skips when DATABASE_URL is unset). Unit tests run
 without a database. E2E tests skip gracefully when `DATABASE_URL` is not set.
 
 Unit tests: `test/markdown.test.ts` (frontmatter parsing), `test/chunkers/recursive.test.ts`
