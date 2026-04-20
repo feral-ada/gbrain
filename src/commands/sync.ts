@@ -5,6 +5,8 @@ import type { BrainEngine } from '../core/engine.ts';
 import { importFile } from '../core/import-file.ts';
 import { buildSyncManifest, isSyncable, pathToSlug } from '../core/sync.ts';
 import type { SyncManifest } from '../core/sync.ts';
+import { createProgress } from '../core/progress.ts';
+import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 
 export interface SyncResult {
   status: 'up_to_date' | 'synced' | 'first_sync' | 'dry_run';
@@ -178,29 +180,43 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
   let chunksCreated = 0;
   const start = Date.now();
 
+  // Per-file progress on stderr so agents see each step of a big sync.
+  // Phases: sync.deletes, sync.renames, sync.imports.
+  const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
+
   // Process deletes first (prevents slug conflicts)
-  for (const path of filtered.deleted) {
-    const slug = pathToSlug(path);
-    await engine.deletePage(slug);
-    pagesAffected.push(slug);
+  if (filtered.deleted.length > 0) {
+    progress.start('sync.deletes', filtered.deleted.length);
+    for (const path of filtered.deleted) {
+      const slug = pathToSlug(path);
+      await engine.deletePage(slug);
+      pagesAffected.push(slug);
+      progress.tick(1, slug);
+    }
+    progress.finish();
   }
 
   // Process renames (updateSlug preserves page_id, chunks, embeddings)
-  for (const { from, to } of filtered.renamed) {
-    const oldSlug = pathToSlug(from);
-    const newSlug = pathToSlug(to);
-    try {
-      await engine.updateSlug(oldSlug, newSlug);
-    } catch {
-      // Slug doesn't exist or collision, treat as add
+  if (filtered.renamed.length > 0) {
+    progress.start('sync.renames', filtered.renamed.length);
+    for (const { from, to } of filtered.renamed) {
+      const oldSlug = pathToSlug(from);
+      const newSlug = pathToSlug(to);
+      try {
+        await engine.updateSlug(oldSlug, newSlug);
+      } catch {
+        // Slug doesn't exist or collision, treat as add
+      }
+      // Reimport at new path (picks up content changes)
+      const filePath = join(repoPath, to);
+      if (existsSync(filePath)) {
+        const result = await importFile(engine, filePath, to, { noEmbed });
+        if (result.status === 'imported') chunksCreated += result.chunks;
+      }
+      pagesAffected.push(newSlug);
+      progress.tick(1, newSlug);
     }
-    // Reimport at new path (picks up content changes)
-    const filePath = join(repoPath, to);
-    if (existsSync(filePath)) {
-      const result = await importFile(engine, filePath, to, { noEmbed });
-      if (result.status === 'imported') chunksCreated += result.chunks;
-    }
-    pagesAffected.push(newSlug);
+    progress.finish();
   }
 
   // Process adds and modifies.
@@ -213,19 +229,28 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
   // ep_poll whenever the diff crosses the old > 10 threshold that used to
   // trigger the outer wrap. Per-file atomicity is also the right granularity:
   // one file's failure should not roll back the others' successful imports.
-  for (const path of [...filtered.added, ...filtered.modified]) {
-    const filePath = join(repoPath, path);
-    if (!existsSync(filePath)) continue;
-    try {
-      const result = await importFile(engine, filePath, path, { noEmbed });
-      if (result.status === 'imported') {
-        chunksCreated += result.chunks;
-        pagesAffected.push(result.slug);
+  const addsAndMods = [...filtered.added, ...filtered.modified];
+  if (addsAndMods.length > 0) {
+    progress.start('sync.imports', addsAndMods.length);
+    for (const path of addsAndMods) {
+      const filePath = join(repoPath, path);
+      if (!existsSync(filePath)) {
+        progress.tick(1, `skip:${path}`);
+        continue;
       }
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error(`  Warning: skipped ${path}: ${msg}`);
+      try {
+        const result = await importFile(engine, filePath, path, { noEmbed });
+        if (result.status === 'imported') {
+          chunksCreated += result.chunks;
+          pagesAffected.push(result.slug);
+        }
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`  Warning: skipped ${path}: ${msg}`);
+      }
+      progress.tick(1, path);
     }
+    progress.finish();
   }
 
   const elapsed = Date.now() - start;
