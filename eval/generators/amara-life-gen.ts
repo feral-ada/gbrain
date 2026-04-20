@@ -79,7 +79,10 @@ const SCHEMA_VERSION = 1;         // bump invalidates cache wholesale
 const MODEL_PARAMS = {
   max_tokens: 1500,
   temperature: 1.0,
-  top_p: 1.0,
+  // top_p omitted: current Opus rejects temperature + top_p together.
+  // top_p=1.0 is a no-op (no nucleus truncation), so dropping it has no
+  // semantic effect. Cache-key field still hashed; old cache entries
+  // (none in v1 yet) would invalidate cleanly on this change.
 };
 
 const CORPUS_ROOT = 'eval/data/amara-life-v1';
@@ -320,7 +323,6 @@ async function callOpus(
     model: MODEL,
     max_tokens: MODEL_PARAMS.max_tokens,
     temperature: MODEL_PARAMS.temperature,
-    top_p: MODEL_PARAMS.top_p,
     messages: [{ role: 'user', content: prompt }],
   });
 
