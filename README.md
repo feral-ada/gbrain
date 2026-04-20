@@ -551,7 +551,7 @@ JOBS (Minions)
 
 ADMIN
   gbrain doctor [--json] [--fast]       Health checks (resolver, skills, DB, embeddings)
-  gbrain doctor --fix                   Auto-fix resolver issues
+  gbrain doctor --fix [--dry-run]       Auto-fix DRY violations (delegate inlined rules to conventions)
   gbrain stats                          Brain statistics
   gbrain serve                          MCP server (stdio)
   gbrain integrations                   Integration recipe dashboard
