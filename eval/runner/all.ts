@@ -1,206 +1,435 @@
 /**
- * BrainBench v1 — combined runner.
+ * BrainBench — combined runner (Day 10 rewrite of the v1 Complete plan).
  *
- * Runs every shipping eval category in sequence and writes a unified report
- * to eval/reports/YYYY-MM-DD-brainbench.md. Each category's full output is
- * captured and embedded in the report.
+ * Dispatches every shipping Cat runner and writes a unified markdown
+ * report to `eval/reports/YYYY-MM-DD-brainbench.md`.
  *
- * Usage: bun run eval/runner/all.ts
+ * **Shape:** each Cat runner exposes a CLI entry point and runs in its
+ * own Bun subprocess (atomic, isolated PGLite engine per Cat, per-Cat
+ * stdout/stderr captured intact). Subprocesses are dispatched concurrently
+ * under `p-limit(2)` — max 2 in-flight at any time, which caps peak
+ * memory around 800MB (≈400MB per PGLite instance).
+ *
+ * **Env vars passed through to every child:**
+ *   - `BRAINBENCH_N` — run count per scorecard (1=smoke, 5=iteration,
+ *     10=published). Cat runners honor this internally where relevant.
+ *   - `BRAINBENCH_LLM_CONCURRENCY` — max simultaneous Anthropic calls,
+ *     read by `llm-budget.ts`.
+ *   - `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GROQ_API_KEY` — agent,
+ *     judge, embedding, transcription credentials.
+ *
+ * **Not in the subprocess list (Cat 5, 8, 9):** these are programmatic
+ * runners whose entry points need runtime inputs (claims, probes,
+ * scenarios, pre-seeded state) that can't be passed via CLI flags. They
+ * run from a harness that assembles those inputs; all.ts records their
+ * status as "programmatic (see harness)".
  */
 
-import { execSync } from 'child_process';
+import { spawn } from 'child_process';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
+
+// ─── Cat catalog ──────────────────────────────────────────────────────
+
+interface SubprocessCategory {
+  kind: 'subprocess';
+  num: number;
+  name: string;
+  script: string;
+  /** Bounded timeout per cat. Default 600s (10 min) — long enough for
+   *  N=5 at moderate corpus sizes, short enough to surface hung runs. */
+  timeoutMs?: number;
+}
+
+interface ProgrammaticCategory {
+  kind: 'programmatic';
+  num: number;
+  name: string;
+  reason: string;
+}
+
+type Category = SubprocessCategory | ProgrammaticCategory;
+
+const CATEGORIES: readonly Category[] = [
+  {
+    kind: 'subprocess',
+    num: 1,
+    name: 'Before/After PR #188 (240-page rich corpus, relational queries)',
+    script: 'eval/runner/before-after.ts',
+  },
+  {
+    kind: 'subprocess',
+    num: 2,
+    name: 'Type Accuracy (per-link-type on rich prose)',
+    script: 'eval/runner/type-accuracy.ts',
+  },
+  {
+    kind: 'subprocess',
+    num: 3,
+    name: 'Identity Resolution',
+    script: 'eval/runner/identity.ts',
+  },
+  {
+    kind: 'subprocess',
+    num: 4,
+    name: 'Temporal Queries',
+    script: 'eval/runner/temporal.ts',
+  },
+  {
+    kind: 'programmatic',
+    num: 5,
+    name: 'Source Attribution / Provenance',
+    reason:
+      'Cat 5 needs a claim catalog (gold/citations.json) + Haiku judge. Run via eval/runner/cat5-provenance.ts\'s runCat5({claims, pagesBySlug, ...}) harness.',
+  },
+  {
+    kind: 'subprocess',
+    num: 6,
+    name: 'Auto-link Precision under Prose',
+    script: 'eval/runner/cat6-prose-scale.ts',
+  },
+  {
+    kind: 'subprocess',
+    num: 7,
+    name: 'Performance / Latency',
+    script: 'eval/runner/perf.ts',
+  },
+  {
+    kind: 'programmatic',
+    num: 8,
+    name: 'Skill Behavior Compliance',
+    reason:
+      'Cat 8 needs a probe catalog + agent state. Run via eval/runner/cat8-skill-compliance.ts\'s runCat8({probes, state, ...}).',
+  },
+  {
+    kind: 'programmatic',
+    num: 9,
+    name: 'End-to-End Workflows',
+    reason:
+      'Cat 9 needs a scenario catalog + gold pagesBySlug + agent state. Run via eval/runner/cat9-workflows.ts\'s runCat9({scenarios, state, pagesBySlug, ...}).',
+  },
+  {
+    kind: 'subprocess',
+    num: 10,
+    name: 'Robustness / Adversarial',
+    script: 'eval/runner/adversarial.ts',
+  },
+  {
+    kind: 'subprocess',
+    num: 11,
+    name: 'Multi-modal Ingestion',
+    script: 'eval/runner/cat11-multimodal.ts',
+  },
+  {
+    kind: 'subprocess',
+    num: 12,
+    name: 'MCP Operation Contract',
+    script: 'eval/runner/mcp-contract.ts',
+  },
+];
 
 interface CategoryRun {
   num: number;
   name: string;
-  script: string;
-  status: 'pass' | 'fail';
+  kind: 'subprocess' | 'programmatic';
+  script?: string;
+  status: 'pass' | 'fail' | 'programmatic';
   output: string;
   exitCode: number;
+  elapsedMs: number;
 }
 
-// One row per benchmark. Headline (Cat 1+2 combined) is the consolidated
-// before/after run on the full 240-page rich-prose corpus. Procedural
-// categories (3, 4, 7, 10, 12) test orthogonal capabilities.
-//
-// v0.10.5 additions:
-//   - Cat 2 Type Accuracy (rich prose): per-link-type accuracy measured
-//     directly on the 240-page corpus. The rich-prose bar for inferLinkType,
-//     distinct from Cat 1's retrieval metrics. Validates extraction regex
-//     work (works_at, advises) and exposes per-type confusion.
-const CATEGORIES = [
-  { num: 1, name: 'Before/After PR #188 (240-page rich corpus, relational queries)', script: 'eval/runner/before-after.ts' },
-  { num: 2, name: 'Type Accuracy (per-link-type on rich prose)', script: 'eval/runner/type-accuracy.ts' },
-  { num: 3, name: 'Identity Resolution', script: 'eval/runner/identity.ts' },
-  { num: 4, name: 'Temporal Queries', script: 'eval/runner/temporal.ts' },
-  { num: 7, name: 'Performance / Latency', script: 'eval/runner/perf.ts' },
-  { num: 10, name: 'Robustness / Adversarial', script: 'eval/runner/adversarial.ts' },
-  { num: 12, name: 'MCP Operation Contract', script: 'eval/runner/mcp-contract.ts' },
-];
+// ─── Subprocess dispatch with concurrency cap ─────────────────────────
 
-function runCategory(c: typeof CATEGORIES[0]): CategoryRun {
-  console.log(`\n=== Running Category ${c.num}: ${c.name} ===`);
-  let output = '';
-  let exitCode = 0;
-  try {
-    output = execSync(`bun ${c.script}`, { encoding: 'utf-8', timeout: 600_000, maxBuffer: 50 * 1024 * 1024 });
-  } catch (e: unknown) {
-    const err = e as { stdout?: string; stderr?: string; status?: number };
-    output = (err.stdout || '') + (err.stderr || '');
-    exitCode = err.status ?? 1;
+const DEFAULT_CONCURRENCY = 2;
+const DEFAULT_TIMEOUT_MS = 600_000; // 10 min
+
+function runCatSubprocess(cat: SubprocessCategory): Promise<CategoryRun> {
+  return new Promise(resolve => {
+    const timeoutMs = cat.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const started = Date.now();
+    // eslint-disable-next-line no-console
+    console.log(`  [start] Cat ${cat.num}: ${cat.name}`);
+
+    let output = '';
+    let settled = false;
+    const child = spawn('bun', [cat.script], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: process.env,
+    });
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      output += chunk.toString();
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      output += chunk.toString();
+    });
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGTERM');
+      const elapsed = Date.now() - started;
+      output += `\n\n[TIMEOUT] Cat ${cat.num} exceeded ${timeoutMs}ms — SIGTERM sent.`;
+      resolve({
+        num: cat.num,
+        name: cat.name,
+        kind: 'subprocess',
+        script: cat.script,
+        status: 'fail',
+        output,
+        exitCode: 124,
+        elapsedMs: elapsed,
+      });
+    }, timeoutMs);
+
+    child.on('close', code => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const exitCode = code ?? 1;
+      const elapsedMs = Date.now() - started;
+      const lastLines = output.split('\n').slice(-3).join('\n').trim();
+      // eslint-disable-next-line no-console
+      console.log(
+        `  [done ] Cat ${cat.num}: ${exitCode === 0 ? 'PASS' : 'FAIL'} (${Math.round(elapsedMs / 1000)}s)  ${lastLines ? '— ' + lastLines.split('\n')[0] : ''}`,
+      );
+      resolve({
+        num: cat.num,
+        name: cat.name,
+        kind: 'subprocess',
+        script: cat.script,
+        status: exitCode === 0 ? 'pass' : 'fail',
+        output,
+        exitCode,
+        elapsedMs,
+      });
+    });
+
+    child.on('error', err => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        num: cat.num,
+        name: cat.name,
+        kind: 'subprocess',
+        script: cat.script,
+        status: 'fail',
+        output: output + `\n\nSPAWN ERROR: ${err.message}`,
+        exitCode: 127,
+        elapsedMs: Date.now() - started,
+      });
+    });
+  });
+}
+
+/**
+ * Dispatch subprocess Cats with a bounded concurrency cap. Returns the
+ * CategoryRun array in the same order as the input (not completion order).
+ */
+async function runConcurrently<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const idx = next++;
+      if (idx >= items.length) return;
+      results[idx] = await fn(items[idx]);
+    }
   }
-  const lastLines = output.split('\n').slice(-5).join('\n');
-  console.log(lastLines);
-  return {
-    num: c.num,
-    name: c.name,
-    script: c.script,
-    status: exitCode === 0 ? 'pass' : 'fail',
-    output,
-    exitCode,
-  };
+  const workerCount = Math.min(concurrency, items.length);
+  const workers: Promise<void>[] = [];
+  for (let i = 0; i < workerCount; i++) workers.push(worker());
+  await Promise.all(workers);
+  return results;
 }
 
-function buildReport(runs: CategoryRun[]): string {
+// ─── Report rendering ─────────────────────────────────────────────────
+
+async function readCommit(): Promise<string> {
+  return new Promise(resolve => {
+    const { execSync } = require('child_process');
+    try {
+      resolve(execSync('git rev-parse --short HEAD').toString().trim());
+    } catch {
+      resolve('unknown');
+    }
+  });
+}
+
+async function readBranch(): Promise<string> {
+  return new Promise(resolve => {
+    const { execSync } = require('child_process');
+    try {
+      resolve(execSync('git rev-parse --abbrev-ref HEAD').toString().trim());
+    } catch {
+      resolve('unknown');
+    }
+  });
+}
+
+async function buildReport(runs: CategoryRun[]): Promise<string> {
   const date = new Date().toISOString().slice(0, 10);
-  const passed = runs.filter(r => r.status === 'pass').length;
-  const failed = runs.length - passed;
+  const branch = await readBranch();
+  const commit = await readCommit();
+  const subprocess = runs.filter(r => r.kind === 'subprocess');
+  const passed = subprocess.filter(r => r.status === 'pass').length;
+  const failed = subprocess.filter(r => r.status === 'fail').length;
+  const programmatic = runs.filter(r => r.kind === 'programmatic').length;
 
   const lines: string[] = [];
-  lines.push(`# BrainBench v1 — ${date}`);
+  lines.push(`# BrainBench — ${date}`);
   lines.push('');
-  lines.push(`**Branch:** ${execSync('git rev-parse --abbrev-ref HEAD').toString().trim()}`);
-  lines.push(`**Commit:** \`${execSync('git rev-parse --short HEAD').toString().trim()}\``);
+  lines.push(`**Branch:** ${branch}`);
+  lines.push(`**Commit:** \`${commit}\``);
   lines.push(`**Engine:** PGLite (in-memory)`);
+  lines.push(`**N:** ${process.env.BRAINBENCH_N ?? '5 (iteration default)'}`);
+  lines.push(`**Concurrency:** ${process.env.BRAINBENCH_CONCURRENCY ?? DEFAULT_CONCURRENCY} subprocess slots, ${process.env.BRAINBENCH_LLM_CONCURRENCY ?? '4'} LLM slots`);
   lines.push('');
 
-  lines.push(`## Summary`);
+  lines.push('## Summary');
   lines.push('');
-  lines.push(`${runs.length} categories run. ${passed} passed, ${failed} failed.`);
+  lines.push(`${subprocess.length} subprocess Cats ran. ${passed} passed, ${failed} failed. ${programmatic} programmatic Cats skipped (run via harness).`);
   lines.push('');
-  lines.push(`| # | Category | Status | Script |`);
-  lines.push(`|---|----------|--------|--------|`);
+
+  lines.push('| # | Category | Kind | Status | Elapsed | Notes |');
+  lines.push('|---|----------|------|--------|---------|-------|');
   for (const r of runs) {
-    lines.push(`| ${r.num} | ${r.name} | ${r.status === 'pass' ? '✓ pass' : '✗ fail'} | \`${r.script}\` |`);
+    if (r.kind === 'subprocess') {
+      const status = r.status === 'pass' ? '✓ pass' : '✗ fail';
+      const elapsed = `${Math.round(r.elapsedMs / 1000)}s`;
+      lines.push(`| ${r.num} | ${r.name} | subprocess | ${status} | ${elapsed} | \`${r.script}\` |`);
+    } else {
+      lines.push(`| ${r.num} | ${r.name} | programmatic | — | — | run via harness |`);
+    }
   }
   lines.push('');
 
-  lines.push(`## What this benchmark proves`);
-  lines.push('');
-  lines.push('BrainBench v1 evaluates gbrain end-to-end on a 240-page rich-prose corpus');
-  lines.push('(generated by Claude Opus 4.7, ~$15 one-time, committed to the repo).');
-  lines.push('The headline benchmark is a single before/after comparison: pre-PR-#188');
-  lines.push('vs the full v0.10.3 + v0.10.4 stack on the same data, same queries.');
-  lines.push('Reproducible: `bun run eval/runner/all.ts`, in-memory PGLite, no API keys');
-  lines.push('at run time, ~3 min total.');
-  lines.push('');
-  lines.push('### Headline: PR #188 strictly dominates baseline on every metric');
-  lines.push('');
-  lines.push('Real agents read ranked top-K results, not full sets. AFTER ranks graph');
-  lines.push('hits first (high precision), then fills with grep results. Both metrics');
-  lines.push('go UP — no category goes down.');
-  lines.push('');
-  lines.push('| Metric                | BEFORE PR #188 | AFTER PR #188 | Δ            |');
-  lines.push('|-----------------------|----------------|---------------|--------------|');
-  lines.push('| **Precision@5**       | **39.2%**      | **44.7%**     | **+5.4 pts** |');
-  lines.push('| **Recall@5**          | **83.1%**      | **94.6%**     | **+11.5 pts**|');
-  lines.push('| Correct in top-5      | 217            | 247           | **+30**      |');
-  lines.push('');
-  lines.push('Thirty more correct answers in the top-5 the agent actually reads. Recall');
-  lines.push('jumps 11.5 points — agents now find the answer in their first reads instead');
-  lines.push('of digging through grep noise.');
-  lines.push('');
-  lines.push('### Graph-only ablation (the typed graph alone, no grep)');
-  lines.push('');
-  lines.push('| Metric              | BEFORE (grep) | Graph-only  | Δ           |');
-  lines.push('|---------------------|---------------|-------------|-------------|');
-  lines.push('| **F1 score**        | 57.8%         | **86.6%**   | **+28.8 pts** |');
-  lines.push('| Set precision       | 40.8%         | **81.0%**   | **+40.2 pts** |');
-  lines.push('| Set recall          | 98.9%         | 93.1%       | -5.8 pts    |');
-  lines.push('| Total returned      | 632           | 300         | -53%        |');
-  lines.push('| Correct returned    | 258           | 243         | -6%         |');
-  lines.push('');
-  lines.push('Graph alone catches 94% of what grep catches with HALF the noise. The');
-  lines.push('5.8pt recall gap is mostly Opus-generated prose that paraphrases names');
-  lines.push('without markdown links ("Mark Thomas was there" instead of `[Mark Thomas](slug)`).');
-  lines.push('Closing this needs corpus-aware NER, deferred to v0.10.5.');
-  lines.push('');
-  lines.push('Per-link-type breakdown (graph-only):');
-  lines.push('');
-  lines.push('| Link type   | Expected | Graph found / returned | Recall  | Precision |');
-  lines.push('|-------------|----------|------------------------|---------|-----------|');
-  lines.push('| attended    | 134      | 131 / 134              | 97.8%   | 97.8%     |');
-  lines.push('| works_at    | 50       | 50 / 79                | 100.0%  | 63.3%     |');
-  lines.push('| invested_in | 60       | 50 / 56                | 83.3%   | 89.3%     |');
-  lines.push('| advises     | 17       | 12 / 31                | 70.6%   | 38.7%     |');
-  lines.push('');
-  lines.push('Graph wins biggest where grep is noisiest: relational questions on companies');
-  lines.push('with many incidental mentions ("Who works at Acme?" — grep returns every');
-  lines.push('page that mentions Acme; graph returns just the employees).');
-  lines.push('');
-  lines.push('## Categories not in v1 headline (deferred to v1.1, see TODOS.md)');
-  lines.push('- Cat 5: Source Attribution / Provenance');
-  lines.push('- Cat 6: Auto-link Precision under Prose (at scale beyond 240)');
-  lines.push('- Cat 8: Skill Behavior Compliance (needs LLM agent loop, ~$2K)');
-  lines.push('- Cat 9: End-to-End Workflows (needs LLM agent loop)');
-  lines.push('- Cat 11: Multi-modal Ingestion (needs licensed real datasets)');
-  lines.push('');
-
+  // Embed each subprocess Cat's full output
   for (const r of runs) {
-    lines.push(`---`);
-    lines.push(`# Category ${r.num}: ${r.name}`);
+    if (r.kind !== 'subprocess') continue;
+    lines.push('---');
+    lines.push(`## Cat ${r.num}: ${r.name}`);
     lines.push('');
-    lines.push(`Status: ${r.status === 'pass' ? '✓ PASS' : '✗ FAIL'} (exit ${r.exitCode})`);
+    lines.push(`**Status:** ${r.status === 'pass' ? '✓ PASS' : '✗ FAIL'} (exit ${r.exitCode}, ${Math.round(r.elapsedMs / 1000)}s)`);
     lines.push('');
     lines.push('```');
-    // Trim setup noise (migration messages) from the head.
+    // Trim migration noise
     const trimmed = r.output
       .split('\n')
-      .filter(l => !l.includes('Migration') || l.includes('Migration'))
-      .filter(l => !l.match(/^\s*\d+ migration\(s\) applied$/))
+      .filter(l => !/^\s*\d+ migration\(s\) applied$/.test(l))
+      .filter(l => !/^\s*Migration \d+ applied/.test(l))
       .join('\n');
     lines.push(trimmed);
     lines.push('```');
     lines.push('');
   }
 
-  lines.push(`---`);
-  lines.push(`## How to reproduce`);
+  // Programmatic-only Cats section
+  const progs = runs.filter(r => r.kind === 'programmatic');
+  if (progs.length > 0) {
+    lines.push('---');
+    lines.push('## Programmatic-only Cats');
+    lines.push('');
+    lines.push(
+      'These Cats have no subprocess CLI entry — they require runtime inputs (probes, claims, scenarios, pre-seeded state) that must be composed from a harness. Run them from a test or a runtime script that imports the corresponding `runCatN` function.',
+    );
+    lines.push('');
+    for (const p of progs) {
+      lines.push(`- **Cat ${p.num}: ${p.name}** — ${p.output}`);
+    }
+    lines.push('');
+  }
+
+  lines.push('---');
+  lines.push('## How to reproduce');
   lines.push('');
   lines.push('```bash');
-  lines.push('bun run eval/runner/all.ts');
-  lines.push('```');
+  lines.push('# Full scorecard (N=5 default iteration run)');
+  lines.push('bun run eval:brainbench');
   lines.push('');
-  lines.push('Each category can also run individually:');
-  lines.push('```bash');
+  lines.push('# Smoke mode (N=1, fast)');
+  lines.push('BRAINBENCH_N=1 bun run eval:brainbench');
+  lines.push('');
+  lines.push('# Published baseline (N=10, ~$200 Opus)');
+  lines.push('BRAINBENCH_N=10 bun run eval:brainbench');
+  lines.push('');
+  lines.push('# Individual subprocess Cats');
   for (const c of CATEGORIES) {
-    lines.push(`bun ${c.script}`);
+    if (c.kind === 'subprocess') lines.push(`bun ${c.script}`);
   }
   lines.push('```');
   lines.push('');
-  lines.push('No API keys required. All runs against PGLite in-memory. Total runtime ~3 min.');
+  lines.push(
+    'Subprocess Cats run concurrently at `--concurrency 2` by default (set via `BRAINBENCH_CONCURRENCY`). Programmatic Cats (5, 8, 9) are omitted from `all.ts` because they need runtime inputs; invoke them from a harness.',
+  );
 
   return lines.join('\n');
 }
 
+// ─── Main ─────────────────────────────────────────────────────────────
+
 async function main() {
-  const runs: CategoryRun[] = [];
-  for (const c of CATEGORIES) {
-    runs.push(runCategory(c));
-  }
+  const subprocessCats = CATEGORIES.filter(
+    (c): c is SubprocessCategory => c.kind === 'subprocess',
+  );
+  const concurrency = parseInt(
+    process.env.BRAINBENCH_CONCURRENCY ?? String(DEFAULT_CONCURRENCY),
+    10,
+  );
+
+  // eslint-disable-next-line no-console
+  console.log(`BrainBench dispatch starting: ${subprocessCats.length} subprocess Cats, concurrency=${concurrency}`);
+
+  const subprocessRuns = await runConcurrently(
+    subprocessCats,
+    Number.isFinite(concurrency) && concurrency > 0 ? concurrency : DEFAULT_CONCURRENCY,
+    runCatSubprocess,
+  );
+
+  const programmaticRuns: CategoryRun[] = CATEGORIES
+    .filter((c): c is ProgrammaticCategory => c.kind === 'programmatic')
+    .map(c => ({
+      num: c.num,
+      name: c.name,
+      kind: 'programmatic',
+      status: 'programmatic',
+      output: c.reason,
+      exitCode: 0,
+      elapsedMs: 0,
+    }));
+
+  const allRuns: CategoryRun[] = [...subprocessRuns, ...programmaticRuns].sort((a, b) => a.num - b.num);
 
   const reportDir = 'eval/reports';
   if (!existsSync(reportDir)) mkdirSync(reportDir, { recursive: true });
   const date = new Date().toISOString().slice(0, 10);
   const reportPath = join(reportDir, `${date}-brainbench.md`);
-  writeFileSync(reportPath, buildReport(runs));
+  writeFileSync(reportPath, await buildReport(allRuns));
 
-  console.log(`\n=== Report written to ${reportPath} ===`);
-  console.log(`${runs.filter(r => r.status === 'pass').length}/${runs.length} categories passed`);
+  // eslint-disable-next-line no-console
+  console.log(`\nReport written to ${reportPath}`);
+  // eslint-disable-next-line no-console
+  console.log(
+    `${subprocessRuns.filter(r => r.status === 'pass').length}/${subprocessRuns.length} subprocess Cats passed.`,
+  );
 
-  if (runs.some(r => r.status === 'fail')) process.exit(1);
+  if (subprocessRuns.some(r => r.status === 'fail')) process.exit(1);
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+if (import.meta.main) {
+  main().catch(e => {
+    // eslint-disable-next-line no-console
+    console.error(e);
+    process.exit(1);
+  });
+}
+
+// Exports for tests + harnesses that want to invoke individual pieces.
+export { CATEGORIES, runCatSubprocess, runConcurrently, buildReport };
+export type { Category, SubprocessCategory, ProgrammaticCategory, CategoryRun };

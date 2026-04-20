@@ -33,6 +33,11 @@
     "eval:type-accuracy": "bun eval/runner/type-accuracy.ts",
     "eval:generate-amara-life": "bun eval/generators/amara-life-gen.ts",
     "eval:generate-amara-life:dry": "bun eval/generators/amara-life-gen.ts --dry-run",
+    "eval:brainbench": "bun eval/runner/all.ts",
+    "eval:brainbench:smoke": "BRAINBENCH_N=1 BRAINBENCH_CONCURRENCY=2 bun eval/runner/all.ts",
+    "eval:brainbench:published": "BRAINBENCH_N=10 BRAINBENCH_CONCURRENCY=2 bun eval/runner/all.ts",
+    "eval:cat6": "bun eval/runner/cat6-prose-scale.ts",
+    "eval:cat11": "bun eval/runner/cat11-multimodal.ts",
     "postinstall": "gbrain --version >/dev/null 2>&1 && gbrain apply-migrations --yes --non-interactive 2>/dev/null || true",
     "prepublish:clawhub": "bun run build:all",
     "publish:clawhub": "clawhub package publish . --family bundle-plugin"
