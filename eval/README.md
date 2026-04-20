@@ -30,31 +30,56 @@ bun run eval:world:view
 
 ```
 eval/
-├── data/world-v1/          Canonical world (committed). 240 sharded JSON files.
-│                            One file per entity + _ledger.json metadata.
+├── data/
+│   ├── world-v1/             Canonical world (committed). 240 sharded JSON files.
+│   │                          One file per entity + _ledger.json metadata.
+│   ├── amara-life-v1/        (v0.15+) Fictional-life corpus generated on demand.
+│   │                          inbox/slack/calendar/meetings/notes/docs +
+│   │                          corpus-manifest.json. Gitignored; run
+│   │                          `bun run eval:generate-amara-life` once.
+│   └── gold/                 (v0.15+) Sealed qrels + perturbation gold.
+│                              entities, backlinks, qrels, contradictions, poison,
+│                              personalization-rubric, implicit-preferences, citations.
+│                              Empty templates in v0.15; filled in v1 Complete.
+├── schemas/                  (v0.15+) Portable JSON Schema contracts.
+│                              corpus-manifest, public-probe (PublicQuery with gold
+│                              stripped), tool-schema (12 read + 3 dry_run, 32K cap),
+│                              transcript, scorecard (N ∈ {1,5,10}), evidence-contract.
+│                              Pins the v1→v2 Inspect AI driver-swap boundary.
 ├── generators/
-│   ├── gen.ts              Opus-backed corpus generator (run once; output cached)
-│   ├── world.ts            World-schema scaffolder
-│   └── world-html.ts       World explorer HTML renderer (XSS-safe)
+│   ├── gen.ts                Opus-backed world-v1 generator (cached, $80 cap)
+│   ├── world.ts              World-schema scaffolder
+│   ├── world-html.ts         World explorer HTML renderer (XSS-safe)
+│   ├── amara-life.ts         (v0.15+) Deterministic amara-life skeleton.
+│   │                          Mulberry32 PRNG, 15 contacts, 50+300+20+8+40 items,
+│   │                          plants 10/5/5/3 perturbations at fixed positions.
+│   └── amara-life-gen.ts     (v0.15+) Opus prose expansion. Structured cache key
+│                              (schema_version + template_hash + item_spec_hash),
+│                              $20 hard-stop, --dry-run for smoke tests.
 ├── runner/
-│   ├── multi-adapter.ts    4-adapter side-by-side scorer (N=5)
-│   ├── type-accuracy.ts    Per-link-type accuracy vs gold from _facts
-│   ├── before-after.ts     Original v1 BEFORE/AFTER retrieval run
-│   ├── types.ts            Adapter, Page, Query, RankedDoc interfaces
+│   ├── multi-adapter.ts      4-adapter side-by-side scorer (N=5, seeded order)
+│   ├── type-accuracy.ts      Per-link-type accuracy vs gold from _facts (Cat 2)
+│   ├── adversarial.ts        Cat 10 robustness — 22 hand-crafted edge cases
+│   ├── all.ts                Master runner (current: sequential execSync;
+│                              v1 Complete Day 10: rewrites to async + p-limit(2))
+│   ├── before-after.ts       Original v1 BEFORE/AFTER retrieval run
+│   ├── types.ts              Adapter, Page (extended with email|slack|cal|note),
+│                              Query, RankedDoc. PublicPage/PublicQuery land here
+│                              when sealed qrels enforcement ships (v1 Complete Day 9).
 │   ├── adapters/
-│   │   ├── ripgrep-bm25.ts       EXT-1: classic IR baseline (BM25 over grep hits)
-│   │   ├── vector-only.ts        EXT-2: pure cosine similarity, same embedder
-│   │   └── hybrid-nograph.ts     EXT-3: gbrain hybrid with graph disabled
+│   │   ├── ripgrep-bm25.ts         EXT-1: classic IR baseline (BM25 over grep hits)
+│   │   ├── vector-only.ts          EXT-2: pure cosine similarity, same embedder
+│   │   └── hybrid-nograph.ts       EXT-3: gbrain hybrid with graph disabled
 │   └── queries/
 │       ├── tier5-fuzzy.ts          30 vague-recall queries (hand-authored)
 │       ├── tier5_5-synthetic.ts    50 synthetic outsider queries (AI-authored, labeled)
-│       ├── validator.ts            Query schema enforcement (temporal as_of_date rule)
+│       ├── validator.ts            Schema + temporal as_of_date + one-slash slug rule
 │       └── index.ts                Aggregator + validateAll()
 ├── cli/
-│   ├── world-view.ts       Render + open world.html
-│   ├── query-validate.ts   Validate a Query[] file
-│   └── query-new.ts        Scaffold a Query template
-└── reports/                Benchmark scorecards (gitignored)
+│   ├── world-view.ts         Render + open world.html
+│   ├── query-validate.ts     Validate a Query[] file
+│   └── query-new.ts          Scaffold a Query template
+└── reports/                  Benchmark scorecards (gitignored)
 ```
 
 ## Three contributor paths
