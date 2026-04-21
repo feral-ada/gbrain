@@ -5,15 +5,17 @@ All notable changes to GBrain will be documented in this file.
 ## [0.14.2] - 2026-04-21
 
 ## **Silent binaries are dead. Every bulk action now heartbeats.**
-## **Agents can tell the difference between "working" and "hung."**
+## **Sync stops losing files. Migrations stop retrying forever. Pooler users get a knob.**
 
-`gbrain doctor` on a 52K-page brain used to sit silent for 10+ minutes and then get killed by an agent timeout. The checks always completed when run by hand, but stdout buffered and agents saw nothing. The same pattern hit `embed`, `sync`, `import`, `extract`, `migrate`, and every orchestrator that shelled out to them — progress either went to stdout with `\r` rewrites that collapse when piped, or nowhere at all. v0.14.2 routes every bulk action through one shared reporter. Non-TTY default is plain human lines on stderr, one line per event. Agents that want structured progress flip `--progress-json` and get one JSON object per line.
+Two waves, one release. The progress wave makes every bulk command observable: `gbrain doctor` on a 52K-page brain used to sit silent for 10+ minutes before an agent timeout killed it. v0.14.2 routes 14 bulk commands through one shared reporter that writes to stderr. Non-TTY default is plain human lines; agents that want structured events add `--progress-json` and get one JSON object per line. Stdout stays clean for data output.
+
+The reliability wave fixes eight deferred bugs at the structural gap: `gbrain sync` no longer silently loses files with unquoted-colon YAML titles across any of the three sync paths. `gbrain upgrade` can't get stuck in an infinite retry loop on a wedged migration (3-partial cap + `--force-retry` escape hatch). Supabase pooler users have `GBRAIN_POOL_SIZE` to throttle without touching schemas. `gbrain doctor --fast` tells you WHY it's skipping DB checks. `brain_score` gets a breakdown so 79/100 tells you which component is costing you the 21 points.
 
 Progress events never touch stdout. Data and final summaries still go there. Script you wrote six months ago that parses `gbrain embed` output? Still works. Agent that captures stdout to JSON.parse the result? Now gets clean JSON instead of `\r\r\r1234/52000 pages...` mixed in.
 
 ### The numbers that matter
 
-Measured on this repo (80 unit test files, 14 E2E test files, real Postgres+pgvector, 136 E2E cases incl. 3 new doctor-progress tests):
+Measured on this repo (real Postgres+pgvector, 136+ E2E cases including the 3 new doctor-progress tests):
 
 | Metric                                            | BEFORE v0.14.2         | AFTER v0.14.2                          | Δ              |
 |---------------------------------------------------|------------------------|----------------------------------------|----------------|
@@ -21,10 +23,18 @@ Measured on this repo (80 unit test files, 14 E2E test files, real Postgres+pgve
 | Progress observable when stdout is piped          | **0 of 3**             | **14 of 14**                           | always visible |
 | Canonical JSON event schema                       | none                   | **locked in `docs/progress-events.md`** | stable         |
 | `doctor` silence window on 52K pages              | 10+ min then killed    | **heartbeat every 1s**                 | observable     |
-| `jsonb_integrity` scan targets                    | 4 (missed `page_versions.frontmatter`) | **5** | matches `repair-jsonb` |
+| `jsonb_integrity` scan targets                    | 4 (missed `page_versions.frontmatter`) | **5**   | matches `repair-jsonb` |
 | Minion jobs that update `job.progress`            | 0 bulk cores           | **embed** wired (import/sync/extract ready via callbacks) | DB-backed |
-| Unit tests for progress/CLI plumbing              | 0                      | **37** (progress + cli-options)        | +37            |
-| E2E tests for agent-visible progress              | 0                      | **3** (doctor-progress Tier 1)         | +3             |
+| Sync paths that silently drop files on YAML break | 3 of 3                 | 0 of 3                                 | **no silent loss** |
+| Wedged-migration retry loops                      | infinite               | 3-partial cap + `--force-retry`        | bounded         |
+| Pool-size knob for Supabase pooler                | none                   | `GBRAIN_POOL_SIZE` env                 | first-class     |
+| `doctor --fast` messages                          | 1 catch-all            | 3 source-specific                      | honest signal   |
+| `brain_score` observability                       | one number             | 5-field breakdown (sum == total)       | diagnosable     |
+| Duplicate edges in `gbrain graph` output          | leaked per-origin      | deduped at presentation                | schema preserved |
+| `minion_jobs.max_stalled` default                 | 1 (dead-letter on first stall) | 3                              | autopilot survives long runs |
+| Unit tests for progress/CLI plumbing              | 0                      | **37** (progress + cli-options)        | +37             |
+| E2E tests for agent-visible progress              | 0                      | **3** (doctor-progress Tier 1)         | +3              |
+| Root-cause fixes in the reliability wave          | 0                      | **8 / 8**                              | structural      |
 
 | Bulk command          | Progress today  | Progress after v0.14.2                                        |
 |-----------------------|-----------------|----------------------------------------------------------------|
@@ -48,31 +58,46 @@ Concrete agent win: on a 52K-page brain, `gbrain --progress-json doctor` emits ~
 
 ### What this means for you
 
-If you run `gbrain` in CI, through a Minion worker, or inside any agent that captures stdout, this release means your downstream consumers stop guessing. Slow migrations announce themselves. Long imports name each file. `gbrain jobs get <id>` returns live `progress` for Minion-queued bulk work. The `gbrain doctor` warning you've been ignoring because it fires silently and then 10 minutes later tells you nothing is wrong becomes a 1-second heartbeat that proves it's working. If you're reading logs from a shell pipeline and prefer plain human lines, you don't need to do anything, that's the default for non-TTY stderr. Only add `--progress-json` when you want structured events.
+If you run `gbrain` in CI, through a Minion worker, or inside any agent that captures stdout, this release means your downstream consumers stop guessing. Slow migrations announce themselves. Long imports name each file. `gbrain jobs get <id>` returns live `progress` for Minion-queued bulk work. The `gbrain doctor` warning you've been ignoring because it fires silently and then 10 minutes later tells you nothing is wrong becomes a 1-second heartbeat that proves it's working.
+
+Your reliability loops tighten too. When sync blocks, doctor surfaces the exact file with the YAML problem and the commit where it showed up. When a migration gets stuck, there's a cap and a clear escape. When you're on Supabase's transaction pooler and `gbrain upgrade` spawns subprocesses, set `GBRAIN_POOL_SIZE=2` and stop MaxClients crashes. Run `gbrain doctor` and the `brain_score` breakdown points at what to fix first: embed coverage, link density, timeline coverage, orphans, or dead links.
 
 ## To take advantage of v0.14.2
 
 `gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
 
-1. **Nothing is required.** v0.14.2 is purely additive to the CLI surface, no schema changes, no migration orchestrator, no data rewrites. If your install upgraded cleanly, progress events start flowing the next time you invoke a bulk command.
-2. **To stream structured events to your agent:**
+1. **Progress streaming is purely additive to the CLI surface** (no schema changes for this part). Your install gets observable events the next time you invoke a bulk command.
+2. **Run the migration orchestrator manually if `gbrain upgrade` didn't:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+3. **Stream structured events to your agent:**
    ```bash
    gbrain --progress-json sync 2> progress.log
    # or
    gbrain doctor --progress-json --json > doctor.json 2> doctor.progress
    ```
-3. **For Minion-queued jobs:**
+4. **For Minion-queued jobs:**
    ```bash
    gbrain jobs submit embed
    # while it runs:
    gbrain jobs get <id>   # .progress is live-updated by the worker
    ```
-4. **If `gbrain doctor` still looks hung** on a very large brain, check the CLI output for heartbeat lines. If they're missing, please file an issue at https://github.com/garrytan/gbrain/issues with the command you ran, stdout/stderr samples, and output of `gbrain doctor --fast`.
+5. **Supabase pooler users (port 6543):** if you hit MaxClients during upgrades, set `GBRAIN_POOL_SIZE=2` (or lower) before running `gbrain upgrade`.
+6. **Check sync health after the upgrade:**
+   ```bash
+   gbrain doctor
+   ```
+   If it warns about `sync_failures`, paths and errors are in `~/.gbrain/sync-failures.jsonl`. Fix the offending YAML frontmatter and re-run `gbrain sync`, or use `gbrain sync --skip-failed` to acknowledge known-broken files and advance past them.
+7. **Wedged migrations:** if `doctor` flags a version with 3 consecutive partials, run `gbrain apply-migrations --force-retry vX.Y.Z` to reset the state machine, then `gbrain apply-migrations --yes` to re-attempt.
+8. **If any step fails or the numbers look wrong,** file an issue: https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+   - which step broke
 
 ### Itemized changes
 
-#### Reporter (new, `src/core/progress.ts`)
-
+#### Progress reporter (new, `src/core/progress.ts`)
 - Dependency-free. Modes: `auto` (TTY → `\r`-rewriting; non-TTY → plain lines), `human`, `json` (JSONL on stderr), `quiet`.
 - Rate gating: emits on whichever fires first: `minIntervalMs` (default 1000) or `minItems` (default `max(10, ceil(total/100))`). Final `tick` where `done === total` always emits.
 - `startHeartbeat(reporter, note)` helper for single long-running queries (doctor's `markdown_body_completeness`, `orphans` anti-join, `repair-jsonb` per-column UPDATE).
@@ -80,47 +105,53 @@ If you run `gbrain` in CI, through a Minion worker, or inside any agent that cap
 - EPIPE defense on both sync throws and stream `'error'` events. Singleton module-level SIGINT/SIGTERM handler emits `abort` events for every live phase, one handler no matter how many reporters exist.
 
 #### CLI plumbing (`src/core/cli-options.ts`, `src/cli.ts`)
-
 - Global flags `--quiet`, `--progress-json`, `--progress-interval=<ms>` parsed before command dispatch.
 - `CliOptions` singleton (`getCliOptions`) reachable from every command without threading a new parameter through 20 handlers.
 - `OperationContext.cliOpts` extends shared-op dispatch, MCP callers see defaults, CLI callers see parsed flags.
 - `childGlobalFlags()` helper: appends the parent's flags to every `execSync('gbrain ...')` call in the migration orchestrators, so child progress matches parent mode.
 
 #### JSON event schema
-
 - Stable from v0.14.2, documented in `docs/progress-events.md`.
 - `{event, phase, ts}` always present. Optional: `total`, `done`, `pct`, `eta_ms`, `note`, `elapsed_ms`, `reason`. No fake totals when a query has no count.
 - Phases use `snake_case.dot.path`. Machine-stable. Agent parsers can group by phase prefix (all `doctor.*` events belong to one run).
 
 #### Backward-compat warnings
-
-Progress for `embed`, `files`, `export`, `extract`, `import`, `migrate-engine` moved from stdout to stderr. Stdout now carries only final summaries and `--json` payloads. Scripts that parsed `process.stdout` for progress lines (`\r  1234/52000 pages...`) see empty stdout for those counters, the data they actually want (the final "Embedded N chunks" summary) is still there. Point anything grepping stdout for progress at stderr instead.
+Progress for `embed`, `files`, `export`, `extract`, `import`, `migrate-engine` moved from stdout to stderr. Stdout now carries only final summaries and `--json` payloads. Scripts that parsed `process.stdout` for progress lines (`\r  1234/52000 pages...`) see empty stdout for those counters; the data they actually want (the final "Embedded N chunks" summary) is still there. Point anything grepping stdout for progress at stderr instead.
 
 #### Minion handlers (`src/commands/jobs.ts`)
-
 - `embed` handler passes `job.updateProgress({done, total, embedded, phase})` as the `onProgress` callback. Primary Minion progress channel is DB-backed, readable via `gbrain jobs get <id>` or the `get_job_progress` MCP op. Stderr from `jobs work` stays coarse for daemon liveness.
 - Other handlers (`sync`, `extract`, `backlinks`, `autopilot-cycle`, `import`) have the callback plumbing ready from the core functions; wiring the remaining handlers is a follow-up.
 
-#### `gbrain doctor` fixes
-
+#### `gbrain doctor`
 - `jsonb_integrity` now scans 5 targets (adds `page_versions.frontmatter`), matching `repair-jsonb`'s surface. The old 4-target check missed one of the repair sites.
 - Per-check heartbeats so agents see `doctor.db_checks` starting, which check is in-flight, and `doctor.markdown_body_completeness` scanning.
 - No false totals: the `LIMIT 100` truncation check reports `heartbeat`, not `tick` with a fake count.
+- **Bug 7: `--fast` source-aware messages** (`src/core/config.ts`, `src/cli.ts`, `src/commands/doctor.ts`). New `getDbUrlSource()` returns `'env:GBRAIN_DATABASE_URL' | 'env:DATABASE_URL' | 'config-file' | null`. Doctor emits `Skipping DB checks (--fast mode, URL present from env:GBRAIN_DATABASE_URL)` when applicable.
 
 #### Upgrade (`src/commands/upgrade.ts`)
-
 - Post-upgrade timeout bumped 300s → 1800s (30 min). Override via `GBRAIN_POST_UPGRADE_TIMEOUT_MS`. The old 300s cap killed v0.12.0 graph-backfill migrations on 50K+ brains; heartbeat wiring in v0.14.2 makes the long wait observable.
 
-#### CI guard
+#### Reliability wave (the eight bugs)
+- **Bug 2: `GBRAIN_POOL_SIZE` env knob** (`src/core/db.ts`, `src/commands/import.ts`). Honored by both the singleton pool and the parallel-import worker pool. Defaults to 10; lower for Supabase transaction pooler. `initPostgres` / `initPGLite` now wrap lifecycle in `try { ... } finally { await engine.disconnect() }`.
+- **Bug 3: Migration ledger centralization + wedge cap** (`src/commands/apply-migrations.ts`, `src/core/preferences.ts`). Runner owns all ledger writes. 3 consecutive partials = wedged, skipped with a loud message. New `--force-retry <version>` flag writes a `'retry'` marker without faking success. `complete` status never regresses. `appendCompletedMigration` is idempotent on double-complete.
+- **Bug 5: `v0_14_0` migration registered** (`src/commands/migrations/v0_14_0.ts`). Phase A: `ALTER minion_jobs.max_stalled SET DEFAULT 3` (idempotent). Phase B: emits `pending-host-work.jsonl` entry pointing at `skills/migrations/v0.14.0.md` for shell-jobs adoption.
+- **Bug 6/10: `jsonb_agg(DISTINCT ...)` in legacy `traverseGraph`** (`src/core/postgres-engine.ts`, `src/core/pglite-engine.ts`). Presentation-level dedup only — the schema continues to preserve per-`origin_page_id` / per-`link_source` provenance rows. Fixes duplicate edges like `works_at → companies/brex` appearing twice in `gbrain graph`.
+- **Bug 8: `max_stalled` default 1 → 3** (`src/core/schema-embedded.ts`, `src/core/pglite-schema.ts`, `src/schema.sql`). First lock-lost tick no longer dead-letters. `v0_14_0` Phase A ALTERs existing installs. `autopilot-cycle` handler yields to the event loop between phases so the worker's lock-renewal timer fires.
+- **Bug 9: Sync gate + acknowledge mechanism** (`src/commands/sync.ts`, `src/commands/import.ts`, `src/core/sync.ts`). All 3 sync paths (incremental, full via `runImport`, `gbrain import` git continuity) gate `sync.last_commit` on no-failures. Failures append to `~/.gbrain/sync-failures.jsonl` with dedup key. New `gbrain sync --skip-failed` + `--retry-failed` flags. Doctor surfaces unacknowledged failures.
+- **Bug 11: `brain_score` breakdown + metric clarity** (`src/core/types.ts`, both engines' `getHealth()`). Added `embed_coverage_score`, `link_density_score`, `timeline_coverage_score`, `no_orphans_score`, `no_dead_links_score`. Sum equals `brain_score` by construction. `dead_links` now on `BrainHealth` (resolves a pre-existing `featuresTeaserForDoctor` drift). `orphan_pages` docs clarified — it's "islanded" (no inbound AND no outbound), not the stricter "zero inbound" graph definition.
 
+#### CI guard
 - `scripts/check-progress-to-stdout.sh` greps `src/` for `process.stdout.write('\r...')` and fails `bun run test` if any regression lands.
 
 #### Tests
+- New (progress wave): `test/progress.test.ts` (17 cases — mode resolution, rate gating, EPIPE paths, SIGINT singleton, child phase composition), `test/cli-options.test.ts` (18 cases — flag parsing, `--quiet` skillpack-check collision regression, global-flag strip-and-dispatch), `test/e2e/doctor-progress.test.ts` (3 cases, Tier 1 — spawns the real CLI against a real Postgres, asserts stderr JSONL matches the schema and stdout stays clean).
+- New (reliability wave): `test/traverse-graph-dedup.test.ts`, `test/sync-failures.test.ts`, `test/brain-score-breakdown.test.ts`, `test/migration-resume.test.ts`, `test/migrations-v0_14_0.test.ts`.
+- Extended: `test/migrate.test.ts` (`resolvePoolSize`), `test/doctor.test.ts` (`dbSource`), `test/apply-migrations.test.ts` (`skippedFuture` includes `0.14.0`).
+- E2E updated: `test/e2e/migration-flow.test.ts` assertions aligned with the new runner-owned-ledger contract (orchestrator no longer writes `completed.jsonl` directly).
 
-- `test/progress.test.ts` (17 cases): mode resolution, rate gating, EPIPE paths, SIGINT singleton, child phase composition.
-- `test/cli-options.test.ts` (18 cases): flag parsing, `--quiet` skillpack-check collision regression, global-flag strip-and-dispatch.
-- `test/e2e/doctor-progress.test.ts` (3 cases, Tier 1): spawns the real CLI against a real Postgres, asserts stderr JSONL matches the schema and stdout stays clean.
-- Existing tests continue to pass: 1726/1726 unit, 136/136 E2E.
+#### Deferred to v0.15
+- Deep `AbortSignal` threading through `runEmbedCore` / `runExtractCore` / `runBacklinksCore` / `performSync`. Between-phase yield addresses the Bug 8 lock-renewal root cause; mid-phase cancellation on huge brains belongs in the queue-polish PR.
+- `failJobFromSweeper` for `handleTimeouts` / `handleStalled`. Current direct `status='dead'` writes kept.
 
 ## [0.14.1] - 2026-04-20
 
