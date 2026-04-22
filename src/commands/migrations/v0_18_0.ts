@@ -186,8 +186,10 @@ async function orchestrator(opts: OrchestratorOpts): Promise<OrchestratorResult>
   const c = await phaseCVerify(opts);
   phases.push(c);
 
+  // a.status === 'failed' already early-returned on line 179, so only
+  // c and b determine the final status here. TypeScript narrowing rejects
+  // a redundant a.status === 'failed' check.
   const status: 'complete' | 'partial' | 'failed' =
-    a.status === 'failed' ? 'failed' :
     c.status === 'failed' ? 'failed' :
     b.status === 'failed' ? 'partial' :
     'complete';
