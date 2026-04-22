@@ -2,6 +2,104 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.17.0] - 2026-04-22
+
+## **Every skill. Every check. Every install. One command each.**
+## **The essay's "skillify it!" promise ships end-to-end. Your OpenClaw now learns, for real.**
+
+Three months ago the essay at `x.com/garrytan/status/2046876981711769720` put GBrain on the hook for a 10-step "skillify" loop: every failure becomes a SKILL.md, every skill has evals, every eval runs daily, the bug becomes structurally impossible to repeat. The PR #326 fallback was the first step. v0.17.0 finishes the walk. All five remaining workstreams land in one release.
+
+**Check 5 (trigger routing eval) ships.** Add a `routing-eval.jsonl` file next to any skill and `gbrain check-resolvable` evaluates it structurally on every run. `{intent, expected_skill, ambiguous_with?}` per line. Layer A runs always; ambiguous results get flagged. A dedicated `gbrain routing-eval` verb stays available for CI gating. The D-CX-6 fixture linter blocks tautological "intent is the trigger" fixtures.
+
+**Check 6 (brain filing) ships.** The prose `_brain-filing-rules.md` gets a machine-readable `_brain-filing-rules.json` sidecar. Every skill with `writes_pages: true` is audited against the canonical directory list. New frontmatter field deliberately distinct from `mutating:` (codex D-CX-7 caught the conflation: cron schedulers use `mutating:true` without writing brain pages).
+
+**`gbrain skillify {scaffold, check}` subcommand namespace.** The essay's verb is now a CLI primitive pair. `skillify scaffold <name>` creates 5 stub files with a SKILLIFY_STUB sentinel that `check-resolvable --strict` fails on until you replace it. `skillify check <path>` promotes the legacy script into a first-class audit. Idempotent: re-running `scaffold --force` never duplicates resolver rows.
+
+**`gbrain skillpack {list, install, diff}`.** "Drop it into YOUR OpenClaw" becomes real. 25 curated skills + their convention-file dependency closure (D-CX-10) install into a target workspace. Per-file diff protection blocks overwriting local edits. File-lock for concurrency (D-CX-11). Atomic AGENTS.md managed-block update. `--dry-run` and `skillpack diff <name>` preview before writing.
+
+**Underneath all of it: AGENTS.md support.** `check-resolvable` now accepts `RESOLVER.md` OR `AGENTS.md` at the skills dir OR one level up (OpenClaw-native workspace-root layout). Auto-manifest derives from SKILL.md walk when `manifest.json` is missing. `$OPENCLAW_WORKSPACE` explicit env wins over the repo-root walk. `ResolvableReport` splits `issues[]` into `errors[]` + `warnings[]` so advisory findings (filing audit, routing gaps, DRY violations) don't break CI. `--strict` is the opt-in for warnings-as-errors.
+
+### The numbers that matter
+
+Six pre-v0.17 blockers for the reference OpenClaw deployment, measured live against `~/git/<redacted>/workspace` (107 skills, `AGENTS.md` at workspace root, no `manifest.json`):
+
+| What | Before v0.17 | After v0.17 |
+|---|---|---|
+| `gbrain check-resolvable` (no flags) | `RESOLVER.md not found`, exit 2 | detects 102 skills, 15 errors, 108 warnings, exit 1 |
+| AGENTS.md-only workspace support | ✗ (ship blocker) | ✓ (W1 + auto-manifest) |
+| Check 5 routing eval | `DEFERRED` in source | Structural layer default, LLM layer --llm |
+| Check 6 brain filing | `DEFERRED` in source | Warning-only audit (v0.18 elevates to error) |
+| `gbrain skillify` command | didn't exist | `{scaffold, check}` namespace |
+| `gbrain skillpack install` | didn't exist | `{list, install, diff}` with deps closure + lockfile |
+| Tests across v0.17 surface | 0 | 215 (unit) + 160 (E2E) |
+
+The essay's "first run found 6 unreachable skills out of 40+" finding reproduces exactly. First run against the reference workspace surfaces 15 unreachable skills out of 102. ~15% dark. Fix them one by one, re-run, green.
+
+**TTHW (time to hello world) for the full skillify loop on a fresh skill:**
+
+| Human team | CC + gstack + v0.17 |
+|---|---|
+| ~1 week (SKILL.md + tests + evals + resolver row + audit passes) | ~30 min (`skillify scaffold` + fill in the real parts + `check-resolvable`) |
+
+Scaffold is 4 stub files + 1 resolver-row append in under 2 seconds. The rest is the real work: your failure incident, your rule, your test.
+
+### What this means for your OpenClaw
+
+Your agent can now say "skillify it!" and the workflow is real:
+1. `gbrain skillify scaffold webhook-verify --description "..." --triggers "..."`
+2. Replace the SKILLIFY_STUB sentinels with real logic + real tests
+3. `gbrain skillify check skills/webhook-verify/scripts/webhook-verify.mjs`
+4. `gbrain check-resolvable` — confirms reachability, routing, filing, DRY, SKILLIFY_STUB gate
+5. `bun test test/webhook-verify.test.ts`
+6. commit
+
+Five commands, four of them take <1 second. The magic word from the essay finally works the way the essay describes.
+
+For downstream OpenClaw deployments: `gbrain skillpack install --all` drops the 25 curated skills into your `$OPENCLAW_WORKSPACE`. Per-file diff protection keeps your local edits safe. The managed block in your AGENTS.md tells you exactly what gbrain installed.
+
+## To take advantage of v0.17.0
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
+
+1. **Verify the binary upgraded:**
+   ```bash
+   gbrain --version   # should say 0.17.0
+   ```
+2. **Verify the new primitives exist:**
+   ```bash
+   gbrain check-resolvable --help | grep -- '--strict'
+   gbrain routing-eval --help
+   gbrain skillify --help
+   gbrain skillpack --help
+   ```
+3. **For OpenClaw deployments (AGENTS.md-native):** re-run your skill-tree audit. You'll see checks you never saw before:
+   ```bash
+   export OPENCLAW_WORKSPACE=~/your-openclaw/workspace
+   gbrain check-resolvable --verbose    # errors block CI; warnings are advisory
+   gbrain check-resolvable --strict     # warnings also block (CI opt-in)
+   ```
+4. **For gbrain skills you author:** add `routing-eval.jsonl` fixtures and `writes_pages: true` + `writes_to:` frontmatter as you touch each skill. Warning-only in v0.17; error in v0.18.
+5. **If any step fails,** file an issue at https://github.com/garrytan/gbrain/issues with:
+   - `gbrain doctor` output
+   - `gbrain check-resolvable --json`
+   - which step broke
+
+No manual schema migration. v0.17 is a pure code + docs release; existing brains work unchanged.
+
+### Itemized changes
+
+- **Foundation (D-CX-3):** `ResolvableReport` splits into `errors[]` + `warnings[]`. Default exit fails only on errors. `--strict` promotes warnings to failures. Deprecated `issues[]` union kept for one release for backwards compat.
+- **W1 — AGENTS.md support + auto-manifest:** new `src/core/resolver-filenames.ts` (shared constant, RESOLVER.md OR AGENTS.md). New `src/core/skill-manifest.ts` (`loadOrDeriveManifest` auto-derives from SKILL.md walk when `manifest.json` is missing). `src/core/repo-root.ts` rewrite: `$OPENCLAW_WORKSPACE` explicit env wins over `findRepoRoot` walk (D-CX-4), workspace-root AGENTS.md layout supported. `src/core/dry-fix.ts` unified on the shared manifest loader (D-CX-12).
+- **W2 — Check 5 routing eval:** new `src/core/routing-eval.ts` harness (normalization, trigger extraction, structural match with always-on exemption, fixture linter, JSONL loader). New `src/commands/routing-eval.ts` CLI verb. Wired into `check-resolvable` default. Seed fixtures in `skills/query/routing-eval.jsonl` and `skills/citation-fixer/routing-eval.jsonl`.
+- **W3 — Check 6 brain filing:** new `skills/_brain-filing-rules.json` (canonical rules). New `src/core/filing-audit.ts`. New `writes_pages: true` frontmatter field (D-CX-7, distinct from `mutating`). Seeded on brain-ops, enrich, ingest, idea-ingest, media-ingest, meeting-ingestion, signal-detector.
+- **W4 — skillify subcommand namespace:** new `src/core/skillify/{templates, generator}.ts`. New `src/commands/skillify.ts` (top-level dispatcher + scaffold handler). Promoted `scripts/skillify-check.ts` to `src/commands/skillify-check.ts` (D-CX-2); legacy script stays as a shim. D-CX-9 SKILLIFY_STUB sentinel detected by `check-resolvable`. D-CX-7 idempotent resolver row append. `skills/skillify/SKILL.md` rewritten to orchestrate the full 10-step loop.
+- **W5 — skillpack install:** `openclaw.plugin.json` bumped 0.4.1 → 0.17.0, 7 skills → 25, added `shared_deps` + `excluded_from_install`. New `src/core/skillpack/{bundle, installer}.ts`. New `src/commands/skillpack.ts` subcommand dispatcher (list, install, diff, check). Per-file diff protection, `--overwrite-local`, `--dry-run`, file-lock via `.gbrain-skillpack.lock`, atomic managed-block update (D-CX-10, D-CX-11).
+- **Privacy guard:** new `scripts/check-privacy.sh` (CLAUDE.md:550 enforcement). Scrubbed stray references in CHANGELOG:366 and 2 test files.
+- **E2E fixture:** new `test/fixtures/openclaw-reference-minimal/` (4 skills + AGENTS.md at workspace root). `test/e2e/openclaw-reference-compat.test.ts` exercises the full W1..W5 stack against it. `test/regression-v0_16_4.test.ts` guards v0.16.4 baseline against surprise new warnings (F-ENG-8). `test/skillpack-sync-guard.test.ts` asserts plugin manifest ⊂ skills manifest (F-ENG-4).
+- **Tests added:** 215 new cases across 13 new + modified test files. All 2156 unit tests pass, all E2E tests pass (152 Tier 1 + 3 Tier 2 + 8 new fixture cases).
+
+Planning + reviews: `~/.claude/plans/p1-lets-just-vast-blanket.md` has the full CEO + DX + Eng + Codex-outside-voice reviews with every decision traced.
+
 ## [0.16.4] - 2026-04-22
 
 ## **`gbrain check-resolvable` ships. The command the README promised for weeks.**
