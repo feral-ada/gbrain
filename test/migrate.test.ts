@@ -17,6 +17,60 @@ describe('migrate', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────
+// v0.18 RLS hardening — structural guard for migration v17
+// ─────────────────────────────────────────────────────────────────
+//
+// The base schema shipped 8 gbrain-managed public tables without RLS
+// enabled (access_tokens, mcp_request_log, minion_inbox,
+// minion_attachments, subagent_messages, subagent_tool_executions,
+// subagent_rate_leases, gbrain_cycle_locks). Migration v17 backfills
+// the ENABLE RLS statements for existing brains. This test guards
+// against regressions where the migration gets truncated or the
+// wrong tables get enabled.
+
+describe('migration v17 — rls_backfill_missing_tables', () => {
+  const RLS_BACKFILL_TABLES = [
+    'access_tokens',
+    'mcp_request_log',
+    'minion_inbox',
+    'minion_attachments',
+    'subagent_messages',
+    'subagent_tool_executions',
+    'subagent_rate_leases',
+    'gbrain_cycle_locks',
+    'budget_ledger',
+    'budget_reservations',
+  ];
+
+  test('exists with the expected name', () => {
+    const v17 = MIGRATIONS.find(m => m.version === 17);
+    expect(v17).toBeDefined();
+    expect(v17?.name).toBe('rls_backfill_missing_tables');
+  });
+
+  test('enables RLS on all 8 backfill tables', () => {
+    const v17 = MIGRATIONS.find(m => m.version === 17);
+    expect(v17).toBeDefined();
+    const sql = v17!.sql || '';
+    for (const tbl of RLS_BACKFILL_TABLES) {
+      expect(sql).toContain(`ALTER TABLE ${tbl} ENABLE ROW LEVEL SECURITY`);
+    }
+  });
+
+  test('is gated on BYPASSRLS so it never locks a non-bypass session out of its data', () => {
+    const v17 = MIGRATIONS.find(m => m.version === 17);
+    const sql = v17!.sql || '';
+    expect(sql).toContain('rolbypassrls');
+    expect(sql).toContain('IF has_bypass THEN');
+    expect(sql).toMatch(/RAISE WARNING[^;]*BYPASSRLS/);
+  });
+
+  test('LATEST_VERSION has caught up to 17', () => {
+    expect(LATEST_VERSION).toBeGreaterThanOrEqual(17);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────
 // REGRESSION TESTS — migrations v8 + v9 perf on duplicate-heavy tables
 // ─────────────────────────────────────────────────────────────────
 //

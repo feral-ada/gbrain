@@ -938,30 +938,146 @@ describeE2E('E2E: RLS Verification', () => {
   });
   afterAll(teardownDB);
 
-  test('RLS is enabled on all gbrain tables', async () => {
+  const cliCwd = join(import.meta.dir, '../..');
+  const cliEnv = () => ({ ...process.env, DATABASE_URL: process.env.DATABASE_URL!, GBRAIN_DATABASE_URL: process.env.DATABASE_URL! });
+
+  // Seed a unique suffix per run so concurrent test DBs / crashed prior
+  // runs don't collide. All helper tables follow `gbrain_rls_regression_<suffix>`.
+  const suffix = `${process.pid}_${Date.now()}`;
+
+  test('RLS is enabled on every public table (no hardcoded allowlist)', async () => {
     const conn = getConn();
     const tables = await conn.unsafe(`
       SELECT tablename, rowsecurity FROM pg_tables
       WHERE schemaname = 'public'
-        AND tablename IN ('pages','content_chunks','links','tags','raw_data',
-                           'page_versions','timeline_entries','ingest_log','config','files')
     `);
     const noRls = tables.filter((t: any) => !t.rowsecurity);
     // Some test DBs may not have BYPASSRLS privilege, so RLS might be skipped.
-    // If RLS was enabled, all tables should have it.
+    // If RLS was enabled at all (the common case against Docker postgres), EVERY
+    // public table must have it — no hardcoded IN-list exceptions.
     if (tables.some((t: any) => t.rowsecurity)) {
-      expect(noRls.length).toBe(0);
+      expect(noRls.map((t: any) => t.tablename)).toEqual([]);
     }
   });
 
   test('current user role has BYPASSRLS', async () => {
     const conn = getConn();
     const rows = await conn.unsafe(`SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user`);
-    // Docker test DB uses postgres role which has BYPASSRLS
     if (rows.length > 0) {
       expect(rows[0].rolbypassrls).toBe(true);
     }
   });
+
+  test('gbrain doctor fails with exit 1 when a public table is missing RLS', async () => {
+    const conn = getConn();
+    const tbl = `gbrain_rls_regression_${suffix}`;
+    try {
+      await conn.unsafe(`CREATE TABLE public.${tbl} (id int)`);
+      // Make sure RLS is actually off; CREATE TABLE default is off but be explicit.
+      await conn.unsafe(`ALTER TABLE public.${tbl} DISABLE ROW LEVEL SECURITY`);
+
+      // Init (idempotent) so the CLI has a config to read.
+      Bun.spawnSync({
+        cmd: ['bun', 'run', 'src/cli.ts', 'init', '--non-interactive', '--url', process.env.DATABASE_URL!],
+        cwd: cliCwd, env: cliEnv(), timeout: 15_000,
+      });
+      const result = Bun.spawnSync({
+        cmd: ['bun', 'run', 'src/cli.ts', 'doctor', '--json'],
+        cwd: cliCwd, env: cliEnv(), timeout: 20_000,
+      });
+      const stdout = new TextDecoder().decode(result.stdout);
+      const parsed = JSON.parse(stdout);
+      const rls = parsed.checks.find((c: any) => c.name === 'rls');
+      expect(rls).toBeDefined();
+      expect(rls.status).toBe('fail');
+      expect(rls.message).toContain(tbl);
+      expect(rls.message).toContain('ALTER TABLE');
+      expect(result.exitCode).toBe(1);
+    } finally {
+      await conn.unsafe(`DROP TABLE IF EXISTS public.${tbl}`);
+    }
+  }, 60_000);
+
+  test('GBRAIN:RLS_EXEMPT comment with valid reason exempts a non-RLS public table', async () => {
+    const conn = getConn();
+    const tbl = `gbrain_rls_exempt_ok_${suffix}`;
+    try {
+      await conn.unsafe(`CREATE TABLE public.${tbl} (id int)`);
+      await conn.unsafe(`ALTER TABLE public.${tbl} DISABLE ROW LEVEL SECURITY`);
+      await conn.unsafe(`COMMENT ON TABLE public.${tbl} IS 'GBRAIN:RLS_EXEMPT reason=e2e test fixture, anon-readable ok'`);
+
+      Bun.spawnSync({
+        cmd: ['bun', 'run', 'src/cli.ts', 'init', '--non-interactive', '--url', process.env.DATABASE_URL!],
+        cwd: cliCwd, env: cliEnv(), timeout: 15_000,
+      });
+      const result = Bun.spawnSync({
+        cmd: ['bun', 'run', 'src/cli.ts', 'doctor', '--json'],
+        cwd: cliCwd, env: cliEnv(), timeout: 20_000,
+      });
+      const stdout = new TextDecoder().decode(result.stdout);
+      const parsed = JSON.parse(stdout);
+      const rls = parsed.checks.find((c: any) => c.name === 'rls');
+      expect(rls.status).toBe('ok');
+      expect(rls.message).toContain('explicitly exempt');
+      expect(rls.message).toContain(tbl);
+    } finally {
+      await conn.unsafe(`DROP TABLE IF EXISTS public.${tbl}`);
+    }
+  }, 60_000);
+
+  test('GBRAIN:RLS_EXEMPT comment WITHOUT reason= still fails doctor', async () => {
+    const conn = getConn();
+    const tbl = `gbrain_rls_exempt_bad_${suffix}`;
+    try {
+      await conn.unsafe(`CREATE TABLE public.${tbl} (id int)`);
+      await conn.unsafe(`ALTER TABLE public.${tbl} DISABLE ROW LEVEL SECURITY`);
+      // Missing the `reason=<...>` segment — prefix alone is not enough.
+      await conn.unsafe(`COMMENT ON TABLE public.${tbl} IS 'GBRAIN:RLS_EXEMPT'`);
+
+      Bun.spawnSync({
+        cmd: ['bun', 'run', 'src/cli.ts', 'init', '--non-interactive', '--url', process.env.DATABASE_URL!],
+        cwd: cliCwd, env: cliEnv(), timeout: 15_000,
+      });
+      const result = Bun.spawnSync({
+        cmd: ['bun', 'run', 'src/cli.ts', 'doctor', '--json'],
+        cwd: cliCwd, env: cliEnv(), timeout: 20_000,
+      });
+      const stdout = new TextDecoder().decode(result.stdout);
+      const parsed = JSON.parse(stdout);
+      const rls = parsed.checks.find((c: any) => c.name === 'rls');
+      expect(rls.status).toBe('fail');
+      expect(rls.message).toContain(tbl);
+      expect(result.exitCode).toBe(1);
+    } finally {
+      await conn.unsafe(`DROP TABLE IF EXISTS public.${tbl}`);
+    }
+  }, 60_000);
+
+  test('Non-exempt unrelated COMMENT on a no-RLS table still fails doctor', async () => {
+    const conn = getConn();
+    const tbl = `gbrain_rls_comment_${suffix}`;
+    try {
+      await conn.unsafe(`CREATE TABLE public.${tbl} (id int)`);
+      await conn.unsafe(`ALTER TABLE public.${tbl} DISABLE ROW LEVEL SECURITY`);
+      await conn.unsafe(`COMMENT ON TABLE public.${tbl} IS 'Regular docs comment, not an exemption'`);
+
+      Bun.spawnSync({
+        cmd: ['bun', 'run', 'src/cli.ts', 'init', '--non-interactive', '--url', process.env.DATABASE_URL!],
+        cwd: cliCwd, env: cliEnv(), timeout: 15_000,
+      });
+      const result = Bun.spawnSync({
+        cmd: ['bun', 'run', 'src/cli.ts', 'doctor', '--json'],
+        cwd: cliCwd, env: cliEnv(), timeout: 20_000,
+      });
+      const stdout = new TextDecoder().decode(result.stdout);
+      const parsed = JSON.parse(stdout);
+      const rls = parsed.checks.find((c: any) => c.name === 'rls');
+      expect(rls.status).toBe('fail');
+      expect(result.exitCode).toBe(1);
+    } finally {
+      await conn.unsafe(`DROP TABLE IF EXISTS public.${tbl}`);
+    }
+  }, 60_000);
 });
 
 // ─────────────────────────────────────────────────────────────────
