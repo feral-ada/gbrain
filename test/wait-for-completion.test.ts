@@ -16,7 +16,7 @@ beforeAll(async () => {
   await engine.connect({ database_url: '' });
   await engine.initSchema();
   queue = new MinionQueue(engine);
-}, 30_000);
+}, 60_000);
 
 afterAll(async () => {
   await engine.disconnect();
