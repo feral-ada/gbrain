@@ -376,6 +376,52 @@ Files that MUST be checked on every ship:
 
 A ship without updated docs is an incomplete ship. Period.
 
+## CHANGELOG + VERSION are branch-scoped
+
+**VERSION and CHANGELOG describe what THIS branch adds vs master, not how we got
+here.** Every feature branch that ships gets its own version bump and CHANGELOG
+entry. The entry is product release notes for users; it is not a log of internal
+decisions, review rounds, or codex findings.
+
+**Write the CHANGELOG entry at /ship time, not during development.** Mid-branch
+iterations, review rounds (CEO/Eng/Codex/DX), and implementation detours belong
+in the plan file at `~/.claude/plans/`, not in the CHANGELOG. One unified entry
+per branch, covering what the branch added vs the base branch.
+
+**Never edit a CHANGELOG entry that already landed on master.** If master has
+v0.18.2 and your branch adds features, bump to the next version (v0.19.0, not
+editing master's v0.18.2). When merging master into your branch, master may
+bring new CHANGELOG entries above yours — push your entry above master's
+latest and verify:
+
+- Does CHANGELOG have your branch's own entry separate from master's entries?
+- Is VERSION higher than master's VERSION?
+- Is your entry the topmost `## [X.Y.Z]` entry?
+- `grep "^## \[" CHANGELOG.md` shows a contiguous version sequence?
+
+If any answer is no, fix it before continuing.
+
+**CHANGELOG is for users, not contributors.** Write like product release notes:
+
+- Lead with what the user can now **do** that they couldn't before. Sell the capability.
+- Plain language, not implementation details. "You can now..." not "Refactored the..."
+- **Never mention internal artifacts**: plan file IDs, decision tags (D-CX-#, F-ENG-#),
+  review rounds, codex findings, subcontractor credits. These are invisible to users.
+- Put contributor-facing changes in a separate `### For contributors` section at the bottom.
+- Every entry should make someone think "oh nice, I want to try that."
+
+**What to omit:**
+- "Codex caught X that the CEO review missed" — private process detail.
+- "D-CX-3 split errors/warnings" — tag is meaningless to users; name the feature instead.
+- "Fix-wave PR #N supersedes #M" — supersede chains belong in PR bodies, not release notes.
+- "215 new cases, 3 decisions applied, 7 reviews cleared" — these are planning-mode metrics.
+
+**What to keep:**
+- The user-facing change: what commands exist now, what flag was added, what behavior fixed.
+- Numbers that mean something to the user: TTHW, commands that timed out before, detection counts.
+- Upgrade instructions: `gbrain upgrade` + any manual step if needed.
+- Credit to external contributors when a community PR was incorporated.
+
 ## CHANGELOG voice + release-summary format
 
 Every version entry in `CHANGELOG.md` MUST start with a release-summary section in
