@@ -1078,6 +1078,109 @@ describeE2E('E2E: RLS Verification', () => {
       await conn.unsafe(`DROP TABLE IF EXISTS public.${tbl}`);
     }
   }, 60_000);
+
+  // Regression test for the v24 self-healing guard. If an operator manually
+  // drops budget_ledger and/or budget_reservations (they are migration-only
+  // per v12, not in schema.sql, and the data is regenerable from resolver
+  // logs — so dropping them is a reasonable cleanup), v24 must NOT fail
+  // with 42P01. The information_schema.tables IF EXISTS guards around those
+  // two ALTERs let the migration skip them and continue.
+  //
+  // Without the guard, a brain with dropped budget_* tables would get stuck
+  // in an infinite retry loop: v24 fails → transaction rolls back →
+  // schema_version stays at prior value → next initSchema re-runs v24 →
+  // same failure forever.
+  test('v24 self-heals when budget_ledger + budget_reservations are missing', async () => {
+    const conn = getConn();
+    let priorVersion: string | null = null;
+    try {
+      // Capture current version so we can restore after the test.
+      const verRows = await conn.unsafe(`SELECT value FROM config WHERE key = 'version'`);
+      priorVersion = (verRows[0] as any)?.value ?? null;
+
+      // Simulate an operator who dropped the budget_* tables for any reason
+      // (cleanup, migration from an older gbrain, etc).
+      await conn.unsafe(`DROP TABLE IF EXISTS public.budget_ledger CASCADE`);
+      await conn.unsafe(`DROP TABLE IF EXISTS public.budget_reservations CASCADE`);
+
+      // Roll the version back to 23 so v24 re-runs on the next initSchema.
+      // UPSERT so this works whether the key exists or not.
+      await conn.unsafe(`
+        INSERT INTO config (key, value) VALUES ('version', '23')
+        ON CONFLICT (key) DO UPDATE SET value = '23'
+      `);
+
+      // Re-trigger initSchema via the CLI. With the guard, this should
+      // apply v24 cleanly and advance version to 24. Without the guard,
+      // this would error out with 42P01 and leave version at 23.
+      const result = Bun.spawnSync({
+        cmd: ['bun', 'run', 'src/cli.ts', 'init', '--non-interactive', '--url', process.env.DATABASE_URL!],
+        cwd: cliCwd, env: cliEnv(), timeout: 30_000,
+      });
+      const stdout = new TextDecoder().decode(result.stdout);
+      const stderr = new TextDecoder().decode(result.stderr);
+
+      // Must succeed — no 42P01, no transaction rollback.
+      expect(result.exitCode).toBe(0);
+      expect(stderr + stdout).not.toMatch(/42P01|does not exist.*budget/i);
+
+      // Version must have advanced to 24.
+      const afterRows = await conn.unsafe(`SELECT value FROM config WHERE key = 'version'`);
+      expect((afterRows[0] as any).value).toBe('24');
+
+      // The tables stayed dropped (v12 didn't re-run because current=23 > 12
+      // was already true before this test ran). That's intentional — we're
+      // proving v24 doesn't require those tables to exist.
+      const tblRows = await conn.unsafe(`
+        SELECT tablename FROM pg_tables
+        WHERE schemaname = 'public'
+          AND tablename IN ('budget_ledger', 'budget_reservations')
+      `);
+      expect(tblRows.length).toBe(0);
+    } finally {
+      // Restore: recreate the budget_* tables (minimal schema — just enough
+      // to keep the rest of the test suite happy) and reset version.
+      // Mirror migration v12's CREATE TABLE IF NOT EXISTS exactly so any
+      // downstream test that touches these tables sees the original shape.
+      await conn.unsafe(`
+        CREATE TABLE IF NOT EXISTS budget_ledger (
+          scope          TEXT        NOT NULL,
+          resolver_id    TEXT        NOT NULL,
+          local_date     DATE        NOT NULL,
+          reserved_usd   NUMERIC(12,4) NOT NULL DEFAULT 0,
+          committed_usd  NUMERIC(12,4) NOT NULL DEFAULT 0,
+          cap_usd        NUMERIC(12,4),
+          created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+          PRIMARY KEY (scope, resolver_id, local_date)
+        )
+      `);
+      await conn.unsafe(`
+        CREATE TABLE IF NOT EXISTS budget_reservations (
+          reservation_id TEXT        PRIMARY KEY,
+          scope          TEXT        NOT NULL,
+          resolver_id    TEXT        NOT NULL,
+          local_date     DATE        NOT NULL,
+          estimate_usd   NUMERIC(12,4) NOT NULL,
+          reserved_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+          expires_at     TIMESTAMPTZ NOT NULL,
+          status         TEXT        NOT NULL DEFAULT 'held'
+        )
+      `);
+      // Enable RLS on the recreated tables so the "every public table has
+      // RLS" assertion earlier in this block stays green if re-run.
+      await conn.unsafe(`ALTER TABLE budget_ledger ENABLE ROW LEVEL SECURITY`);
+      await conn.unsafe(`ALTER TABLE budget_reservations ENABLE ROW LEVEL SECURITY`);
+      // Restore version so we don't leave the DB at a weird state for
+      // subsequent test blocks.
+      if (priorVersion !== null) {
+        await conn.unsafe(
+          `UPDATE config SET value = $1 WHERE key = 'version'`,
+          [priorVersion],
+        );
+      }
+    }
+  }, 60_000);
 });
 
 // ─────────────────────────────────────────────────────────────────
