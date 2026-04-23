@@ -77,15 +77,32 @@ GBrain exposes 30+ MCP tools via stdio:
 
 Add to `~/.claude/server.json` (Claude Code), Settings > MCP Servers (Cursor), or your client's MCP config.
 
-### Remote MCP (Claude Desktop, Cowork, Perplexity)
+### Remote MCP with OAuth 2.1 (ChatGPT, Claude Desktop, Cowork, Perplexity)
+
+`gbrain serve --http` starts a production-grade OAuth 2.1 server with an embedded admin dashboard. Zero external infrastructure. Every major AI client connects, every request is scoped, every action is logged.
 
 ```bash
-ngrok http 8787 --url your-brain.ngrok.app
-bun run src/commands/auth.ts create "claude-desktop"
-claude mcp add gbrain -t http https://your-brain.ngrok.app/mcp -H "Authorization: Bearer TOKEN"
+# Start the HTTP server (prints admin bootstrap token on first start)
+gbrain serve --http --port 3131
+
+# Open the admin dashboard, paste the bootstrap token, register a client
+open http://localhost:3131/admin
+
+# Expose publicly (for remote clients)
+ngrok http 3131 --url your-brain.ngrok.app
 ```
 
-Per-client guides: [`docs/mcp/`](docs/mcp/DEPLOY.md). ChatGPT requires OAuth 2.1 (not yet implemented).
+Register OAuth clients from the `/admin` dashboard — click **Register client**,
+pick scopes, save the credentials shown once in the reveal modal. Programmatic
+registration via `oauthProvider.registerClientManual(...)` is also available
+for host repos that wrap the server.
+
+- **OAuth 2.1 via the MCP SDK** — client credentials (machine-to-machine: Perplexity, Claude), authorization code + PKCE (browser-based: ChatGPT), refresh token rotation, revocation, protected resource metadata. Optional Dynamic Client Registration behind `--enable-dcr`.
+- **Scoped operations** — 30 operations tagged `read | write | admin`. `sync_brain` and `file_upload` are `localOnly`, rejected over HTTP.
+- **React admin dashboard** — 7 screens baked into the binary (~65KB gzip). Live SSE activity feed, agents table, credential reveal, filterable request log, per-client config export.
+- **Legacy bearer tokens still work** — pre-v1.0 `gbrain auth create` tokens continue to authenticate as `read+write+admin`.
+
+Per-client guides: [`docs/mcp/`](docs/mcp/DEPLOY.md).
 
 ## The 26 Skills
 
@@ -566,6 +583,11 @@ ADMIN
   gbrain doctor --fix [--dry-run]       Auto-fix DRY violations (delegate inlined rules to conventions)
   gbrain stats                          Brain statistics
   gbrain serve                          MCP server (stdio)
+  gbrain serve --http [--port 3131]     HTTP MCP server with OAuth 2.1 + admin dashboard
+                                        [--token-ttl 3600] [--enable-dcr]
+  bun run src/commands/auth.ts          Legacy bearer token management (create/list/revoke/test)
+  # OAuth 2.1 clients: register from the /admin dashboard or via
+  # oauthProvider.registerClientManual() for host-repo wrappers.
   gbrain integrations                   Integration recipe dashboard
   gbrain check-backlinks check|fix      Back-link enforcement
   gbrain lint [--fix]                   LLM artifact detection
