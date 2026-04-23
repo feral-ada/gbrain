@@ -396,7 +396,14 @@ export class BrainRegistry {
     const { createEngine } = await import('./engine-factory.ts');
     const engineConfig = mountToEngineConfig(mount);
     const engine = await createEngine(engineConfig);
-    await engine.connect(engineConfig);
+    // Mounts MUST use per-instance connection pools, never the module
+    // singleton in db.ts. Passing poolSize forces postgres-engine onto the
+    // instance path (postgres-engine.ts:33-60). Without this, two mounts
+    // with different Postgres URLs silently share whichever singleton was
+    // connected first (Codex finding #1). PGLite ignores poolSize — it has
+    // no pool. Hard-coded 5: conservative cap for mounts given N brains
+    // can be mounted at once. Override per-mount is PR 1.
+    await engine.connect({ ...engineConfig, poolSize: 5 } as EngineConfig & { poolSize: number });
     return {
       id: mount.id,
       engine,
