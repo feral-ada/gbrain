@@ -854,6 +854,24 @@ export const MIGRATIONS: Migration[] = [
         created_at             TIMESTAMPTZ NOT NULL DEFAULT now()
       );
       CREATE INDEX IF NOT EXISTS idx_mcp_log_time_agent ON mcp_request_log(created_at, token_name);
+      -- Enable RLS on the new OAuth tables (gated on BYPASSRLS, consistent with
+      -- the v24 rls_backfill pattern and the base schema.sql DO block). Without
+      -- this, fresh v25 upgrades on Postgres would leave 3 public tables
+      -- readable by the anon key via PostgREST, which the v0.18.1 doctor check
+      -- flags as a failure.
+      DO $$
+      DECLARE
+        has_bypass BOOLEAN;
+      BEGIN
+        SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+        IF has_bypass THEN
+          ALTER TABLE oauth_clients ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE oauth_tokens ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE oauth_codes ENABLE ROW LEVEL SECURITY;
+        ELSE
+          RAISE WARNING 'v25: role % lacks BYPASSRLS — skipping RLS on OAuth tables. Re-run as postgres (or a BYPASSRLS role) to harden.', current_user;
+        END IF;
+      END $$;
     `,
   },
 ];

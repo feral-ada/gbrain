@@ -605,6 +605,10 @@ BEGIN
     ALTER TABLE subagent_tool_executions ENABLE ROW LEVEL SECURITY;
     ALTER TABLE subagent_rate_leases ENABLE ROW LEVEL SECURITY;
     ALTER TABLE gbrain_cycle_locks ENABLE ROW LEVEL SECURITY;
+    -- v1.0.0 OAuth 2.1 tables
+    ALTER TABLE oauth_clients ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE oauth_tokens ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE oauth_codes ENABLE ROW LEVEL SECURITY;
     RAISE NOTICE 'RLS enabled on all tables (role % has BYPASSRLS)', current_user;
   ELSE
     RAISE WARNING 'Skipping RLS: role % does not have BYPASSRLS privilege. Run as postgres role to enable.', current_user;

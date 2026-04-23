@@ -1124,9 +1124,10 @@ describeE2E('E2E: RLS Verification', () => {
       expect(result.exitCode).toBe(0);
       expect(stderr + stdout).not.toMatch(/42P01|does not exist.*budget/i);
 
-      // Version must have advanced to 24.
+      // Version must have advanced past 24 (v24 cleared → later migrations apply).
+      // Any ">=24" is fine; the point of this test is that v24 did NOT abort the chain.
       const afterRows = await conn.unsafe(`SELECT value FROM config WHERE key = 'version'`);
-      expect((afterRows[0] as any).value).toBe('24');
+      expect(parseInt((afterRows[0] as any).value, 10)).toBeGreaterThanOrEqual(24);
 
       // The tables stayed dropped (v12 didn't re-run because current=23 > 12
       // was already true before this test ran). That's intentional — we're
