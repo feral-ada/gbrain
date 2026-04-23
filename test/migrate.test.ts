@@ -173,6 +173,93 @@ describe('migrate — ordering guarantee (v15 must NOT be skipped by v16)', () =
 });
 
 // ─────────────────────────────────────────────────────────────────
+// v0.18.1 RLS hardening — structural guard for migration v24
+// ─────────────────────────────────────────────────────────────────
+//
+// The base schema shipped 8 gbrain-managed public tables without RLS
+// enabled (access_tokens, mcp_request_log, minion_inbox,
+// minion_attachments, subagent_messages, subagent_tool_executions,
+// subagent_rate_leases, gbrain_cycle_locks). Migration v12 created
+// two more (budget_ledger, budget_reservations) without RLS.
+// Migration v24 backfills the ENABLE RLS statements for existing
+// brains. This test guards against regressions where the migration
+// gets truncated or the wrong tables get enabled.
+
+describe('migration v24 — rls_backfill_missing_tables', () => {
+  const RLS_BACKFILL_TABLES = [
+    'access_tokens',
+    'mcp_request_log',
+    'minion_inbox',
+    'minion_attachments',
+    'subagent_messages',
+    'subagent_tool_executions',
+    'subagent_rate_leases',
+    'gbrain_cycle_locks',
+    'budget_ledger',
+    'budget_reservations',
+  ];
+
+  test('exists with the expected name', () => {
+    const v24 = MIGRATIONS.find(m => m.version === 24);
+    expect(v24).toBeDefined();
+    expect(v24?.name).toBe('rls_backfill_missing_tables');
+  });
+
+  test('enables RLS on all 10 backfill tables', () => {
+    const v24 = MIGRATIONS.find(m => m.version === 24);
+    expect(v24).toBeDefined();
+    const sql = v24!.sql || '';
+    for (const tbl of RLS_BACKFILL_TABLES) {
+      expect(sql).toContain(`ALTER TABLE ${tbl} ENABLE ROW LEVEL SECURITY`);
+    }
+  });
+
+  test('is gated on BYPASSRLS so it never locks a non-bypass session out of its data', () => {
+    const v24 = MIGRATIONS.find(m => m.version === 24);
+    const sql = v24!.sql || '';
+    expect(sql).toContain('rolbypassrls');
+    // The gate can be either IF has_bypass / early-raise pattern.
+    expect(sql).toMatch(/IF (NOT )?has_bypass/);
+  });
+
+  // Self-healing guard: the budget_* tables are migration-only (v12). If an
+  // operator manually dropped them, or if a brain was somehow pinned to a
+  // pre-v12 version when those tables didn't exist, a bare `ALTER TABLE
+  // budget_ledger ...` would fail with 42P01 and abort v24. Wrapping those
+  // two ALTERs in an `IF EXISTS (information_schema.tables ...)` check lets
+  // the migration skip them silently instead of erroring out. The other 8
+  // tables are created by schema.sql on every initSchema and don't need
+  // the guard — bare ALTER is fine.
+  test('guards budget_ledger + budget_reservations with information_schema.tables IF EXISTS', () => {
+    const v24 = MIGRATIONS.find(m => m.version === 24);
+    const sql = v24!.sql || '';
+    // Both budget tables must be wrapped in an existence check.
+    expect(sql).toMatch(
+      /IF EXISTS \(SELECT 1 FROM information_schema\.tables[\s\S]{0,200}table_name = 'budget_ledger'\)[\s\S]{0,200}ALTER TABLE budget_ledger ENABLE ROW LEVEL SECURITY/,
+    );
+    expect(sql).toMatch(
+      /IF EXISTS \(SELECT 1 FROM information_schema\.tables[\s\S]{0,200}table_name = 'budget_reservations'\)[\s\S]{0,200}ALTER TABLE budget_reservations ENABLE ROW LEVEL SECURITY/,
+    );
+  });
+
+  // Codex found: if v24 RAISE WARNINGs instead of raising on non-BYPASSRLS,
+  // the migration runner still bumps schema_version to 24, permanently
+  // skipping the backfill on future runs even after the role is fixed.
+  // The fix is to raise loudly so the transaction aborts, version stays
+  // at 23, and the next initSchema call retries after role reassignment.
+  test('fails loudly on non-BYPASSRLS roles instead of silently bumping version', () => {
+    const v24 = MIGRATIONS.find(m => m.version === 24);
+    const sql = v24!.sql || '';
+    expect(sql).toMatch(/RAISE EXCEPTION[^;]*BYPASSRLS/);
+    expect(sql).not.toMatch(/RAISE WARNING[^;]*BYPASSRLS/);
+  });
+
+  test('LATEST_VERSION has caught up to 24', () => {
+    expect(LATEST_VERSION).toBeGreaterThanOrEqual(24);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────
 // REGRESSION TESTS — migrations v8 + v9 perf on duplicate-heavy tables
 // ─────────────────────────────────────────────────────────────────
 //

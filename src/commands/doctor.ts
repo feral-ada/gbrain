@@ -276,25 +276,94 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
     // best-effort; never fail doctor on this check
   }
 
-  // 5. RLS
+  // 5. RLS — check ALL public tables, not just gbrain's own.
+  // Any table without RLS in the public schema is a security risk:
+  // Supabase exposes the public schema via PostgREST, so tables without
+  // RLS are readable/writable by anyone with the anon key.
+  //
+  // Escape hatch ("write it in blood"): if a user or plugin deliberately
+  // wants a public-schema table readable by the anon key (analytics,
+  // materialized views the anon key needs), they can exempt it with a
+  // Postgres COMMENT whose value starts with:
+  //
+  //     GBRAIN:RLS_EXEMPT reason=<non-empty reason>
+  //
+  // The comment lives in pg_description, survives pg_dump, is visible in
+  // schema diffs, and requires raw SQL in psql to set — there is no
+  // `gbrain rls-exempt add` CLI on purpose. Doctor re-enumerates the
+  // exemption list on every successful run so exempt tables never go
+  // invisible. See docs/guides/rls-and-you.md.
   progress.heartbeat('rls');
-  try {
-    const sql = db.getConnection();
-    const tables = await sql`
-      SELECT tablename, rowsecurity FROM pg_tables
-      WHERE schemaname = 'public'
-        AND tablename IN ('pages','content_chunks','links','tags','raw_data',
-                           'page_versions','timeline_entries','ingest_log','config','files')
-    `;
-    const noRls = tables.filter((t: any) => !t.rowsecurity);
-    if (noRls.length === 0) {
-      checks.push({ name: 'rls', status: 'ok', message: 'RLS enabled on all tables' });
-    } else {
-      const names = noRls.map((t: any) => t.tablename).join(', ');
-      checks.push({ name: 'rls', status: 'warn', message: `RLS not enabled on: ${names}` });
+  if (engine.kind === 'pglite') {
+    // PGLite is embedded and single-user — no PostgREST exposure,
+    // RLS is not a meaningful security boundary here.
+    checks.push({
+      name: 'rls',
+      status: 'ok',
+      message: 'Skipped (PGLite — no PostgREST exposure, RLS not applicable)',
+    });
+  } else {
+    try {
+      const sql = db.getConnection();
+      // Left-join pg_description so we get the (optional) COMMENT ON TABLE
+      // value alongside rowsecurity in a single round-trip. Filter to
+      // base tables in the public schema.
+      const tables = await sql`
+        SELECT
+          t.tablename,
+          t.rowsecurity,
+          COALESCE(
+            obj_description(format('public.%I', t.tablename)::regclass, 'pg_class'),
+            ''
+          ) AS comment
+        FROM pg_tables t
+        WHERE t.schemaname = 'public'
+      `;
+      const EXEMPT_RE = /^GBRAIN:RLS_EXEMPT\s+reason=\S.{3,}/;
+      const exempt: string[] = [];
+      const gaps: string[] = [];
+      for (const t of tables as Array<any>) {
+        if (t.rowsecurity) continue;
+        if (EXEMPT_RE.test(t.comment || '')) {
+          exempt.push(t.tablename);
+        } else {
+          gaps.push(t.tablename);
+        }
+      }
+      if (gaps.length === 0) {
+        const suffix = exempt.length > 0
+          ? ` (${exempt.length} explicitly exempt: ${exempt.join(', ')})`
+          : '';
+        checks.push({
+          name: 'rls',
+          status: 'ok',
+          message: `RLS enabled on ${tables.length - exempt.length}/${tables.length} public tables${suffix}`,
+        });
+      } else {
+        const names = gaps.join(', ');
+        // Double-escape " inside identifiers so a pathological table name
+        // like `weird"table` renders as `"weird""table"` in the remediation
+        // SQL (matches how Postgres parses quoted identifiers). Doubling
+        // any existing " is the minimum needed to keep the output valid
+        // copy-paste SQL. Extremely rare in practice but cheap to get right.
+        const fixes = gaps
+          .map(n => `ALTER TABLE "public"."${n.replace(/"/g, '""')}" ENABLE ROW LEVEL SECURITY;`)
+          .join(' ');
+        const exemptInfo = exempt.length > 0
+          ? ` (${exempt.length} other table(s) explicitly exempt.)`
+          : '';
+        checks.push({
+          name: 'rls',
+          status: 'fail',
+          message:
+            `${gaps.length} table(s) WITHOUT Row Level Security: ${names}.${exemptInfo} ` +
+            `Fix: ${fixes} ` +
+            `If a table should stay readable by the anon key on purpose, see docs/guides/rls-and-you.md for the GBRAIN:RLS_EXEMPT comment escape hatch.`,
+        });
+      }
+    } catch {
+      checks.push({ name: 'rls', status: 'warn', message: 'Could not check RLS status' });
     }
-  } catch {
-    checks.push({ name: 'rls', status: 'warn', message: 'Could not check RLS status' });
   }
 
   // 6. Schema version — also surfaces the #218 "postinstall silently failed"
