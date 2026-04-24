@@ -135,11 +135,11 @@ beforeAll(async () => {
   sharedEngine = new PGLiteEngine();
   await sharedEngine.connect({});
   await sharedEngine.initSchema();
-}, 30_000); // 21-migration init needs breathing room under full-suite load
+}, 60_000); // OAuth v25 + full migration chain needs breathing room
 
 afterAll(async () => {
   if (sharedEngine) await sharedEngine.disconnect();
-}, 15_000);
+}, 60_000);
 
 beforeEach(() => {
   lintCalls = [];

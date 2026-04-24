@@ -27,11 +27,11 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({ database_url: '' });
   await engine.initSchema();
-}, 30_000); // 21-migration init needs breathing room under full-suite load
+}, 60_000); // OAuth v25 + full migration chain needs breathing room
 
 afterAll(async () => {
   if (engine) await engine.disconnect();
-}, 15_000);
+}, 60_000);
 
 beforeEach(async () => {
   await engine.executeRaw('DELETE FROM pages');
