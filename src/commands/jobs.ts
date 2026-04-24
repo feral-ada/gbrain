@@ -72,6 +72,23 @@ USAGE
   gbrain jobs work [--queue Q] [--concurrency N]
   gbrain jobs supervisor [--concurrency N] [--queue Q] [--pid-file PATH]
                          [--max-crashes N] [--health-interval N]
+                         [--allow-shell-jobs] [--cli-path PATH] [--json]
+
+    Auto-restarting wrapper around `gbrain jobs work`. Spawns the worker
+    as a child process and restarts on crash with exponential backoff
+    (1s → 60s cap). Writes a PID file to `~/.gbrain/supervisor.pid` by
+    default (override via --pid-file or GBRAIN_SUPERVISOR_PID_FILE env).
+
+    EXIT CODES
+      0  clean shutdown (SIGTERM/SIGINT received, worker drained)
+      1  max crashes exceeded (worker kept dying)
+      2  another supervisor holds the PID lock
+      3  PID file unwritable (permission / path error)
+
+    EXAMPLES
+      gbrain jobs supervisor --concurrency 4      # human-friendly, blocks
+      gbrain jobs supervisor --json               # JSONL lifecycle events on stderr
+      gbrain jobs supervisor --allow-shell-jobs   # opt in to shell-exec handler
 
 HANDLER TYPES (built in)
   sync              Pull and embed new pages from the repo
@@ -490,22 +507,27 @@ HANDLER TYPES (built in)
         process.exit(1);
       }
 
-      const { MinionSupervisor } = await import('../core/minions/supervisor.ts');
+      const { MinionSupervisor, DEFAULT_PID_FILE } = await import('../core/minions/supervisor.ts');
       const { resolveGbrainCliPath } = await import('./autopilot.ts');
 
       const concurrency = parseInt(parseFlag(args, '--concurrency') ?? '2', 10);
       const queueName = parseFlag(args, '--queue') ?? 'default';
-      const pidFile = parseFlag(args, '--pid-file') ?? '/tmp/gbrain-supervisor.pid';
+      // Three-tier PID path resolution: --pid-file > GBRAIN_SUPERVISOR_PID_FILE > ~/.gbrain/supervisor.pid.
+      // DEFAULT_PID_FILE already checks the env var, so we only need the flag-vs-default branch here.
+      const pidFile = parseFlag(args, '--pid-file') ?? DEFAULT_PID_FILE;
       const maxCrashes = parseInt(parseFlag(args, '--max-crashes') ?? '10', 10);
       const healthInterval = parseInt(parseFlag(args, '--health-interval') ?? '60000', 10);
+      const jsonMode = hasFlag(args, '--json');
+      // --allow-shell-jobs opts the child worker into the shell handler. Falls back to the
+      // env var for backwards compat (agent scripts that set GBRAIN_ALLOW_SHELL_JOBS=1).
+      const allowShellJobs = hasFlag(args, '--allow-shell-jobs') ||
+                             !!process.env.GBRAIN_ALLOW_SHELL_JOBS;
 
-      let cliPath: string;
-      try {
-        cliPath = resolveGbrainCliPath();
-      } catch {
-        // Fallback: use the same invocation path as the current process
-        cliPath = process.argv[1] ?? 'gbrain';
-      }
+      // CLI path resolution: explicit --cli-path wins; otherwise resolveGbrainCliPath()
+      // throws a clear install-hint message if it can't find a compiled binary. We let
+      // that throw propagate rather than falling back to process.argv[1] (which in dev
+      // is a .ts source, not a valid spawn target — see codex finding #5).
+      const cliPath = parseFlag(args, '--cli-path') ?? resolveGbrainCliPath();
 
       const supervisor = new MinionSupervisor(engine, {
         concurrency,
@@ -514,7 +536,8 @@ HANDLER TYPES (built in)
         maxCrashes,
         healthInterval,
         cliPath,
-        allowShellJobs: !!process.env.GBRAIN_ALLOW_SHELL_JOBS,
+        allowShellJobs,
+        json: jsonMode,
       });
 
       await supervisor.start();
