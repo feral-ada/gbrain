@@ -96,7 +96,16 @@ import G_ZIG from '../../assets/wasm/grammars/tree-sitter-zig.wasm' with { type:
 // v3: Chonkie parity (Layer 5) — 36 languages + tiktoken cl100k_base tokenizer
 // + small-sibling merging. Every v0.18.0 brain with code pages re-chunks on
 // next sync because the chunk sizes + symbol boundaries shift.
-export const CHUNKER_VERSION = 3;
+//
+// v4 (v0.20.0 Cathedral II Layer 12): chunk-grain FTS vector + qualified
+// symbol name + parent_symbol_path + doc_comment columns. Chunk_text headers
+// will gain the qualified name and scope chain once Layer 5/6 lands. The
+// bump + sources.chunker_version gate (in src/commands/sync.ts) forces a
+// full walk on upgraded brains even when git HEAD hasn't moved, so existing
+// chunks get the new columns populated. Without this, the v28 backfill
+// gives every existing chunk a search_vector but subsequent Layer 5 AST
+// work would silently no-op.
+export const CHUNKER_VERSION = 4;
 
 // Lazy-loaded tree-sitter module (v0.22.x API: Parser is default export)
 let Parser: typeof import('web-tree-sitter') | null = null;

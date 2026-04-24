@@ -13,7 +13,7 @@ import {
   unacknowledgedSyncFailures,
   acknowledgeSyncFailures,
 } from '../core/sync.ts';
-import { estimateTokens } from '../core/chunkers/code.ts';
+import { estimateTokens, CHUNKER_VERSION } from '../core/chunkers/code.ts';
 import { EMBEDDING_MODEL, estimateEmbeddingCostUsd } from '../core/embedding.ts';
 import { errorFor, serializeError } from '../core/errors.ts';
 import type { SyncManifest } from '../core/sync.ts';
@@ -212,6 +212,43 @@ async function writeSyncAnchor(
   await engine.setConfig(`sync.${which}`, value);
 }
 
+/**
+ * v0.20.0 Cathedral II Layer 12 (SP-1 fix) — read/write the chunker version
+ * last used to sync a given source. When it mismatches CURRENT_CHUNKER_VERSION,
+ * `performSync` forces a full walk regardless of git HEAD equality. Without
+ * this gate, bumping CHUNKER_VERSION does NOTHING on an unchanged repo
+ * because sync short-circuits at `up_to_date` before reaching
+ * `importCodeFile`'s content_hash check.
+ *
+ * Per-source storage matches writeSyncAnchor's shape — sources.chunker_version
+ * TEXT column from the v27 migration. No global fallback: non-source syncs
+ * (pre-v0.17 brains with no sources table) never had CHUNKER_VERSION
+ * version-gating, so they keep the v0.19.0 behavior.
+ */
+async function readChunkerVersion(
+  engine: BrainEngine,
+  sourceId: string | undefined,
+): Promise<string | null> {
+  if (!sourceId) return null;
+  const rows = await engine.executeRaw<{ chunker_version: string | null }>(
+    `SELECT chunker_version FROM sources WHERE id = $1`,
+    [sourceId],
+  );
+  return rows[0]?.chunker_version ?? null;
+}
+
+async function writeChunkerVersion(
+  engine: BrainEngine,
+  sourceId: string | undefined,
+  version: string,
+): Promise<void> {
+  if (!sourceId) return;
+  await engine.executeRaw(
+    `UPDATE sources SET chunker_version = $1 WHERE id = $2`,
+    [version, sourceId],
+  );
+}
+
 export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<SyncResult> {
   // Resolve repo path
   const repoPath = opts.repoPath || await readSyncAnchor(engine, opts.sourceId, 'repo_path');
@@ -275,8 +312,19 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
     return performFullSync(engine, repoPath, headCommit, opts);
   }
 
-  // No changes
-  if (lastCommit === headCommit) {
+  // v0.20.0 Cathedral II Layer 12 (codex SP-1 fix): before returning
+  // 'up_to_date' on git-HEAD equality, check the chunker version gate.
+  // If sources.chunker_version mismatches CURRENT_CHUNKER_VERSION, force
+  // a full re-walk so existing chunks get re-chunked under the new
+  // pipeline (qualified symbol names, parent scope, doc-comment column
+  // population, etc.). Without this, upgraded brains silently stay on
+  // the old chunks — the whole reason we bumped the version.
+  const storedVersion = await readChunkerVersion(engine, opts.sourceId);
+  const currentVersion = String(CHUNKER_VERSION);
+  const versionMismatch = storedVersion !== null && storedVersion !== currentVersion;
+  const versionNeverSet = storedVersion === null && opts.sourceId !== undefined;
+
+  if (lastCommit === headCommit && !versionMismatch && !versionNeverSet) {
     return {
       status: 'up_to_date',
       fromCommit: lastCommit,
@@ -286,6 +334,16 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
       embedded: 0,
       pagesAffected: [],
     };
+  }
+
+  if ((versionMismatch || versionNeverSet) && lastCommit === headCommit) {
+    console.log(
+      `[sync] chunker_version gate: stored=${storedVersion ?? 'unset'}, current=${currentVersion}. ` +
+      `Forcing full re-chunk pass (git HEAD unchanged but pipeline version advanced).`,
+    );
+    const result = await performFullSync(engine, repoPath, headCommit, opts);
+    await writeChunkerVersion(engine, opts.sourceId, currentVersion);
+    return result;
   }
 
   // Diff using git diff (net result, not per-commit)
@@ -348,6 +406,7 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
     // Update sync state even with no syncable changes (git advanced)
     await writeSyncAnchor(engine, opts.sourceId, 'last_commit', headCommit);
     await engine.setConfig('sync.last_run', new Date().toISOString());
+    await writeChunkerVersion(engine, opts.sourceId, String(CHUNKER_VERSION));
     return {
       status: 'up_to_date',
       fromCommit: lastCommit,
@@ -498,6 +557,10 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
   await writeSyncAnchor(engine, opts.sourceId, 'last_commit', headCommit);
   await engine.setConfig('sync.last_run', new Date().toISOString());
   await writeSyncAnchor(engine, opts.sourceId, 'repo_path', repoPath);
+  // v0.20.0 Cathedral II Layer 12: persist the chunker version we just
+  // finished with so the next sync's up_to_date gate respects it. Only
+  // source-scoped syncs track this (see readChunkerVersion for rationale).
+  await writeChunkerVersion(engine, opts.sourceId, String(CHUNKER_VERSION));
 
   // Log ingest
   await engine.logIngest({
@@ -621,6 +684,8 @@ async function performFullSync(
   await writeSyncAnchor(engine, opts.sourceId, 'last_commit', headCommit);
   await engine.setConfig('sync.last_run', new Date().toISOString());
   await writeSyncAnchor(engine, opts.sourceId, 'repo_path', repoPath);
+  // v0.20.0 Cathedral II Layer 12: persist chunker version for the gate.
+  await writeChunkerVersion(engine, opts.sourceId, String(CHUNKER_VERSION));
 
   // Full sync doesn't track pagesAffected, so fall back to embed --stale.
   // Before commit 2: runEmbed is void; use result.imported as best estimate of
