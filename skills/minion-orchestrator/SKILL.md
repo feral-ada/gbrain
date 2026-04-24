@@ -2,11 +2,17 @@
 name: minion-orchestrator
 version: 1.0.0
 description: |
-  Manage background agents via Minions job queue. Use when: spawning subagents,
-  checking agent progress, steering running agents, pausing/resuming work,
-  parallel task execution, fan-out research. Replaces sessions_spawn for
-  durable, observable, steerable agents.
+  Unified Minions skill for both deterministic shell jobs and LLM subagent
+  orchestration. Use when: gbrain jobs submission/monitoring, shell/background
+  tasks, spawning subagents, checking progress, steering running work,
+  pausing/resuming, parallel fan-out. Replaces split minion skills with one
+  durable, observable, steerable queue interface.
 triggers:
+  - "gbrain jobs"
+  - "submit a shell job"
+  - "shell job"
+  - "run shell command in background"
+  - "deterministic background task"
   - "spawn agent"
   - "background task"
   - "run in background"
@@ -40,8 +46,12 @@ mutating: true
 
 ## Contract
 
-Minions is a Postgres-native job queue for durable, observable agent orchestration.
-Every background agent task goes through Minions. No in-memory subagent spawning.
+Minions is a Postgres-native job queue for durable, observable background work.
+This single skill handles two lanes:
+- Deterministic shell jobs (`gbrain jobs submit shell ...`)
+- LLM subagent jobs (spawn/steer/pause/resume/replay)
+
+Every background task goes through Minions. No in-memory subagent spawning.
 
 Guarantees:
 - Jobs survive gateway restart (Postgres-backed)
@@ -50,19 +60,64 @@ Guarantees:
 - Jobs can be paused, resumed, or cancelled at any time
 - Parent-child DAGs with configurable failure policies
 
-## When to Use Minions vs Inline Work
+## Route the Request: Shell Job vs Subagent
 
 | Condition | Action |
 |---|---|
-| Single tool call, < 30s | Do it inline |
-| Multi-step, any duration | Submit as Minion job |
-| Parallel work (2+ streams) | Submit N Minion jobs with shared parent |
-| Needs to survive restart | Submit as Minion job |
-| User wants progress updates | Submit as Minion job with progress tracking |
-| Research / bulk operation | Submit as Minion job, always |
-| File imports, bulk embeds | Submit as Minion job |
+| User asks for deterministic command/script run | Shell job (`name="shell"`) |
+| User asks to "run in minions" + explicit command/argv | Shell job (`cmd` or `argv`) |
+| User asks for research/reasoning/iterative agent | Subagent job (`name="subagent"`) |
+| User asks to steer/pause/resume an agent | Subagent job lifecycle tools |
+| Single simple operation under ~30s | Consider inline execution first |
+| Needs restart durability/observability | Submit as Minion job |
+| Parallel work (2+ streams) | Parent + child Minion jobs |
 
-**Rule of thumb:** If it takes more than 3 tool calls, use a Minion.
+If intent is ambiguous, ask one clarification:
+"Do you want a deterministic shell command job, or an LLM agent job?"
+
+## Shell Jobs (Deterministic Scripts)
+
+Use for reproducible command execution, ETL steps, cron work, and scriptable
+tasks where no LLM reasoning loop is needed.
+
+### Submit
+
+Command string form:
+```
+submit_job name="shell" data={"cmd":"echo hello","cwd":"/abs/path"}
+```
+
+Argv form (no shell expansion):
+```
+submit_job name="shell" data={"argv":["bash","-lc","echo hello"],"cwd":"/abs/path"}
+```
+
+Queue/lifecycle options still apply (`queue`, `priority`, `max_attempts`,
+`delay`, timeout/retry knobs exposed by the jobs interface).
+
+### Monitor
+
+```
+list_jobs --name shell --status active
+get_job ID
+get_job_progress ID
+```
+
+Check structured result fields (exit code, stdout/stderr tails, attempts,
+timings) from `get_job`.
+
+### Control
+
+```
+cancel_job id=ID
+replay_job id=ID
+```
+
+Use idempotency keys for recurring shell workloads to avoid duplicate runs.
+
+## Subagent Jobs (LLM Orchestration)
+
+Use for open-ended reasoning, tool-using research, and fan-out synthesis.
 
 ## Phase 1: Submit
 
