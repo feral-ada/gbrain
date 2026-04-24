@@ -1128,4 +1128,45 @@ export class PostgresEngine implements BrainEngine {
     const conn = this.sql;
     return conn.unsafe(sql, params as Parameters<typeof conn.unsafe>[1]) as unknown as T[];
   }
+
+  // ============================================================
+  // v0.20.0 Cathedral II: code edges (Layer 1 stubs — filled by Layer 5)
+  // ============================================================
+  // Declared here so the interface contract is satisfied and consumers can
+  // import against them. Implementations throw until the edge extractor +
+  // per-lang tree-sitter queries land in Layer 5/6.
+  // ============================================================
+
+  async addCodeEdges(_edges: import('./types.ts').CodeEdgeInput[]): Promise<number> {
+    throw new Error('addCodeEdges: not implemented yet — lands in Cathedral II Layer 5 (A1 edge extractor)');
+  }
+
+  async deleteCodeEdgesForChunks(_chunkIds: number[]): Promise<void> {
+    throw new Error('deleteCodeEdgesForChunks: not implemented yet — lands in Cathedral II Layer 5/6');
+  }
+
+  async getCallersOf(
+    _qualifiedName: string,
+    _opts?: { sourceId?: string; allSources?: boolean; limit?: number },
+  ): Promise<import('./types.ts').CodeEdgeResult[]> {
+    throw new Error('getCallersOf: not implemented yet — lands in Cathedral II Layer 5');
+  }
+
+  async getCalleesOf(
+    _qualifiedName: string,
+    _opts?: { sourceId?: string; allSources?: boolean; limit?: number },
+  ): Promise<import('./types.ts').CodeEdgeResult[]> {
+    throw new Error('getCalleesOf: not implemented yet — lands in Cathedral II Layer 5');
+  }
+
+  async getEdgesByChunk(
+    _chunkId: number,
+    _opts?: { direction?: 'in' | 'out' | 'both'; edgeType?: string; limit?: number },
+  ): Promise<import('./types.ts').CodeEdgeResult[]> {
+    throw new Error('getEdgesByChunk: not implemented yet — lands in Cathedral II Layer 7 (A2 two-pass)');
+  }
+
+  async searchKeywordChunks(_query: string, _opts?: SearchOpts): Promise<SearchResult[]> {
+    throw new Error('searchKeywordChunks: not implemented yet — lands in Cathedral II Layer 3 (1b chunk-grain FTS)');
+  }
 }
