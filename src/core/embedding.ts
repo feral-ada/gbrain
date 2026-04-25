@@ -60,6 +60,18 @@ export function getEmbeddingDimensions(): number {
   return gatewayGetDims();
 }
 
-// Back-compat exports for tests that imported these from v0.13 (now evaluate lazily).
+// Back-compat exports for tests that imported these from v0.13.
 export const EMBEDDING_MODEL = 'text-embedding-3-large';
 export const EMBEDDING_DIMENSIONS = 1536;
+
+/**
+ * USD cost per 1k tokens for text-embedding-3-large. Used by
+ * `gbrain sync --all` cost preview and `reindex-code` to surface
+ * expected spend before accepting expensive operations.
+ */
+export const EMBEDDING_COST_PER_1K_TOKENS = 0.00013;
+
+/** Compute USD cost estimate for embedding `tokens` at current model rate. */
+export function estimateEmbeddingCostUsd(tokens: number): number {
+  return (tokens / 1000) * EMBEDDING_COST_PER_1K_TOKENS;
+}
