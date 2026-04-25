@@ -1124,10 +1124,14 @@ describeE2E('E2E: RLS Verification', () => {
       expect(result.exitCode).toBe(0);
       expect(stderr + stdout).not.toMatch(/42P01|does not exist.*budget/i);
 
-      // Version must have advanced past 24 (v24 cleared → later migrations apply).
-      // Any ">=24" is fine; the point of this test is that v24 did NOT abort the chain.
+      // Version must have advanced PAST 24. Since v0.18.1, v25-v29 (v0.19.0
+      // + v0.21.0 Cathedral II) and v30 (OAuth) have shipped. init runs every
+      // pending migration, so after rolling back to 23 the version advances
+      // to LATEST_VERSION. The test's intent is to prove v24 didn't crash on
+      // missing budget_* tables — assert version >= 24.
       const afterRows = await conn.unsafe(`SELECT value FROM config WHERE key = 'version'`);
-      expect(parseInt((afterRows[0] as any).value, 10)).toBeGreaterThanOrEqual(24);
+      const finalVersion = parseInt((afterRows[0] as any).value, 10);
+      expect(finalVersion).toBeGreaterThanOrEqual(24);
 
       // The tables stayed dropped (v12 didn't re-run because current=23 > 12
       // was already true before this test ran). That's intentional — we're

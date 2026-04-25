@@ -105,6 +105,210 @@ React admin dashboard baked into the binary. Seven screens designed through Stev
 **Tests:**
 - `test/oauth.test.ts` ... 27 test cases covering provider: register, getClient, client_credentials exchange, auth_code flow with PKCE, refresh rotation, verifyAccessToken (OAuth + legacy fallback), revokeToken, sweepExpiredTokens, scope annotations on all 30 operations.
 
+
+## [0.21.0] - 2026-04-25
+
+## **Your brain walks the code graph now.**
+## **Call-graph edges, parent scope, chunk-grain FTS. 165-lang ready, 8 langs shipped with structural edges.**
+
+v0.19.0 made code a first-class citizen. v0.21.0 makes it a graph. An agent asking "how does searchKeyword handle N+1" no longer gets back one chunk of `hybrid.ts`. It gets the function body, the 3 callers via `code-callers`, the 2 callees via `code-callees`, the class-level scope header, and — when opt-in `--walk-depth 2` is passed — the grandchildren too. All ranked together by a single RRF pass with 1/(1+hop) structural decay. One walk. Code-aware brain, not grep-class RAG.
+
+Chunk-grain FTS replaces page-grain internally. The docstring above a function now ranks above a prose paragraph that happens to mention the same term. The `content_chunks.search_vector` tsvector weights doc_comment 'A' and chunk_text 'B' — an english-language query hits the right chunk first. External shape stays page-grain so every existing caller (`enrichment-service.countMentions`, `backlinks`, `list_pages`) works unchanged.
+
+Classes emit properly now. `class BrainEngine { searchKeyword() {}, searchVector() {} }` was ONE chunk in v0.19.0. In v0.21.0 it's three: the class-level scope header chunk (declaration + member digest), `searchKeyword` with `parentSymbolPath: ['BrainEngine']`, and `searchVector` with the same. Retrieval surfaces individual methods when a query targets one — no more re-reading the whole class.
+
+Ruby ships in the first wave of structural-edge support. `Admin::UsersController#render` identity. `def render` captured. `find_all` captured. Across all 8 shipped languages (TS, TSX, JS, Python, Ruby, Go, Rust, Java — ~85% of real brain code) call-site edges extract at chunk time and land in `code_edges_symbol` for `getCallersOf` / `getCalleesOf` to surface.
+
+The honest part: precision 80, recall 99. We don't do receiver-type inference at capture time (`obj.method()` stores the bare `method` callee, not `ObjClass.method`). Cross-file edge resolution is also a future optimization — all Layer 5 edges land unresolved. What matters: the edges exist. `getCallersOf('helper')` now returns every call site in the brain, ready for Layer 7 two-pass retrieval to expand into structural neighbors. That's the 10x leap.
+
+### The numbers that matter
+
+Counted against gbrain's own codebase, PGLite in-memory benchmark:
+
+| Metric | v0.19.0 | v0.21.0 | Δ |
+|---|---|---|---|
+| Structural edge types captured | 0 | `calls` (per-file) | ∞ |
+| Languages with call-graph edges | 0 | 8 | +8 |
+| Chunk grain at FTS time | page-level | chunk-level (internal) | — |
+| File classifier extensions | 9 | 35 | +26 |
+| Nested symbol chunks (class with 3 methods) | 1 chunk | 4 chunks | 4x |
+| Parent-scope column persisted | No | `parent_symbol_path TEXT[]` | ✓ |
+| `code-callers <sym>` + `code-callees <sym>` | not possible | JSON array in <100ms | ∞ |
+| `query --near-symbol X --walk-depth 2` | not possible | 2-hop structural expansion | ∞ |
+| `sync --all` cost preview | no warning | `ConfirmationRequired` envelope + TTY prompt | ✓ |
+| Markdown fence extraction | prose chunks | per-fence code chunks | ✓ |
+
+Per-language call capture (8 shipped):
+
+| Lang | Top-level | Class/module | Edge capture via |
+|---|---|---|---|
+| TypeScript | function_declaration, class_declaration, interface, type_alias, enum | class + interface → methods | call_expression.function |
+| TSX | same + JSX | same | same |
+| JavaScript | function_declaration, class_declaration, lexical_declaration | class → methods | call_expression.function |
+| Python | function_definition, class_definition | class → function_definition | call.function |
+| Ruby | class, module, method, singleton_method | module+class → method+singleton_method | call.method |
+| Go | function_declaration, method_declaration | (methods are top-level) | call_expression.function |
+| Rust | function_item, impl_item, struct, enum, trait, mod | impl+trait → function_item | call_expression.function |
+| Java | method_declaration, class_declaration, interface, enum, record | class+interface+record → method+constructor | method_invocation.name |
+
+### What this means for builders
+
+If you've been maintaining a gbrain deployment on v0.19.0, upgrading is mechanical: `gbrain upgrade` runs `apply-migrations` → schema v27 + v28 land automatically (~5 seconds on a 47K-page brain). Your next `gbrain sync --source <id>` detects `sources.chunker_version` mismatch and forces a full re-walk — no manual intervention. Or run `gbrain reindex-code --dry-run` to preview the cost, then `gbrain reindex-code --yes` to take advantage of A1 + A3 immediately.
+
+If you ship an agent on top of gbrain: `query --lang typescript "N+1"` now filters at SQL level, `code-callers searchKeyword` surfaces who calls it, `query "how does searchKeyword work" --near-symbol BrainEngine.searchKeyword --walk-depth 2` expands through the structural graph. Your agent's brain-first lookup covers the CODE GRAPH now, not just the symbol table.
+
+If you're Garry wondering how your Rubyist instincts survive the upgrade: `class Admin::UsersController { def render; def find_all }` gets qualified as `Admin::UsersController#render`. `code-callers render` finds the call sites. The instance-vs-singleton distinction is best-effort today (Layer 5 treats both as instance); `def self.find_all` vs `def find_all` ambiguity is documented in the Ruby-specific caveats of `skills/migrations/v0.21.0.md`.
+
+## To take advantage of v0.21.0
+
+`gbrain upgrade` runs `gbrain post-upgrade` which runs `gbrain apply-migrations`. If that chain was interrupted or if `gbrain doctor` warns about a partial migration:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+   The `v0.21.0` orchestrator (v0_21_0.ts) runs schema → backfill-prompt → verify. Schema migrations v27 + v28 land unconditionally. The backfill-prompt phase prints two paths to roll the new chunker over existing code pages.
+
+2. **Pick a backfill path.** CHUNKER_VERSION bumped 3 → 4; the `sources.chunker_version` gate (SP-1 fix) forces a full re-walk on next sync regardless of git HEAD.
+
+   - AUTOMATIC (recommended): next `gbrain sync --source <id>` walks everything. Zero action needed.
+   - IMMEDIATE: `gbrain reindex-code --dry-run` previews cost, `gbrain reindex-code --yes` runs it. Cost preview gated via `ConfirmationRequired` envelope on non-TTY callers, exit code 2 matches `sync --all`.
+
+3. **Verify the outcome:**
+   ```bash
+   gbrain doctor                           # expect schema_version >= 28
+   gbrain code-callers <your-favorite-fn>  # expect a JSON array of call sites
+   gbrain query "some concept in your brain" --walk-depth 1
+   gbrain stats
+   ```
+
+4. **If any step fails or the numbers look wrong,** file an issue at https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+   - which step broke
+
+   This feedback loop is how the gbrain maintainers find fragile upgrade paths. Thank you.
+
+### Itemized changes
+
+**Layer 1 — Foundation schema migration (v27).** All DDL lands first, before any consumer. `content_chunks` gains `parent_symbol_path TEXT[]`, `doc_comment TEXT`, `symbol_name_qualified TEXT`, `search_vector TSVECTOR`. `sources` gains `chunker_version TEXT` (SP-1 gate). Two new tables: `code_edges_chunk` (resolved, FK CASCADE both ways) + `code_edges_symbol` (unresolved qualified-name edges). Plpgsql trigger `update_chunk_search_vector` weights doc_comment + symbol_name_qualified 'A', chunk_text 'B'. Per codex SP-4: every downstream layer has its schema prerequisites before referencing them. `scripts/check-jsonb-pattern.sh` + migration tests pin the DDL shape so accidental drift surfaces in CI.
+
+**Layer 2 (1a) — File-classifier widening.** `src/core/sync.ts` expands from 9 recognized code extensions to 35 — Rust, Ruby, Java, C#, C/C++, Swift, Kotlin, Scala, PHP, Elixir, Elm, OCaml, Dart, Zig, Solidity, Lua, shell, etc. New `resolveSlugForPath(path)` centralizes slug dispatch (SP-5 fix) so delete/rename paths honor the same code-vs-markdown classification as import. Layer 9 (Magika) fallback hook ready via `setLanguageFallback`.
+
+**Layer 3 (1b) — Chunk-grain FTS with page-grain wrap.** `searchKeyword` now ranks internally at chunk grain via the new `search_vector`, then dedups to best-chunk-per-page before returning. External shape unchanged (SP-6 decision) — every `searchKeyword` caller (`enrichment-service`, `backlinks`, `list_pages`) sees the same page-grain result. A2 two-pass consumes the raw chunk-grain primitive via the new `searchKeywordChunks` method. Weight A (doc_comment + symbol_name_qualified) > Weight B (chunk_text) means docstring matches rank above prose for NL queries.
+
+**Layer 4 (B1) — Language manifest foundation.** The hardcoded `GRAMMAR_PATHS` + `DISPLAY_LANG` maps collapse into one `LANGUAGE_MANIFEST` keyed by `LanguageEntry` (embeddedPath | lazyLoader | displayName). `registerLanguage` / `unregisterLanguage` / `listRegisteredLanguages` are extension points; downstream consumers can add grammars without forking the chunker. 29 shipped embedded today; the lazy-load path is forward-compat for the full 165-language pack.
+
+**Layer 5 (A1) — Edge extractor + qualified names (8 langs).** The 10x leap. `src/core/chunkers/edge-extractor.ts` walks the tree-sitter tree iteratively (no recursion — generated code trees can blow the stack) and harvests call-site edges per-language. `src/core/chunkers/qualified-names.ts` builds identity strings per-language: Ruby `Admin::UsersController#render`, Python `admin.users.UsersController.render`, TS `BrainEngine.searchKeyword`, Rust `users::UsersController::render`. `importCodeFile` calls `deleteCodeEdgesForChunks` (codex SP-2 inbound invalidation) then `addCodeEdges`. Both engines (PGLite + Postgres) implement all 5 edge methods: `addCodeEdges`, `deleteCodeEdgesForChunks`, `getCallersOf`, `getCalleesOf`, `getEdgesByChunk`. Readers UNION both tables forever (codex 1.3b: no promotion).
+
+**Layer 6 (A3) — Parent-scope + nested-chunk emission.** A class with 3 methods emits 4 chunks now: the class-level scope header (slim body: declaration line + member digest) + each method with `parentSymbolPath: ['ClassName']`. Chunk headers show `(in ClassName.method)` so the embedding captures scope. Recursive expansion: Ruby `module Admin { class Users { def render } }` emits 3 chunks — Admin, Users (parent=[Admin]), render (parent=[Admin, Users]). `mergeSmallSiblings` bails when scope chunks are present (methods emitted individually on purpose; merging would erase the parent-path metadata).
+
+**Layer 7 (A2) — Two-pass structural retrieval.** `src/core/search/two-pass.ts` expands an anchor set up to 2 hops through `code_edges_chunk` + `code_edges_symbol`, unresolved-edge targets resolved by symbol_name_qualified lookup. Score decay 1/(1+hop). Default OFF per codex F5. Activation: `--walk-depth N` (1 or 2) or `--near-symbol <qualified-name>`. Neighbor cap 50 per hop. Dedup per-page cap lifts from 2 → `min(10, walkDepth × 5)` when walking.
+
+**Layer 8 (D) — Tier D bundle.** Three deferred items from v0.19.0 ship here. **D1** `sync --all` cost preview via `estimateTokens` + `EMBEDDING_COST_PER_1K_TOKENS = 0.00013` + `ConfirmationRequired` envelope (TTY prompt or exit-2 on non-TTY / JSON / piped). **D2** markdown fence extraction — `importFromContent` walks marked lexer tokens, extracts recognized `{type:'code', lang, text}` fences through `chunkCodeText` with pseudo-path, persists as `chunk_source='fenced_code'`. 100-fence-per-page cap (env override `GBRAIN_MAX_FENCES_PER_PAGE`). **D3** `reconcile-links` batch command — forward-scans every markdown page via `extractCodeRefs`, reinserts missing doc↔impl edges idempotently (`ON CONFLICT DO NOTHING`). Respects `auto_link=false` config.
+
+**Layer 10 (C) — Agent CLI surfaces.** `query --lang typescript` and `query --symbol-kind function|class|method` filter at SQL level (C1 + C2). `code-callers <symbol>` (C4) and `code-callees <symbol>` (C5) ship as new commands — auto-JSON on non-TTY, StructuredAgentError on failure. `query --near-symbol <qualified> --walk-depth 1..2` (C3) wires A2 two-pass through the query operation. C6 (`code-signature`) deferred to v0.20.1 per plan.
+
+**Layer 12 — CHUNKER_VERSION 3 → 4 + SP-1 gate.** The ship-silent bug codex caught on second pass: bumping `CHUNKER_VERSION` alone did nothing on an unchanged repo because `performSync` returns `up_to_date` before reaching `importCodeFile`'s content_hash check. Fix: `sources.chunker_version` tracks the version that last synced each source; mismatch forces a full re-walk regardless of git HEAD equality. `writeChunkerVersion` called after every `writeSyncAnchor 'last_commit'`.
+
+**Layer 13 (E2) — reindex-code + migration orchestrator.** `gbrain reindex-code [--source <id>] [--dry-run] [--yes] [--force] [--json]` — explicit backfill for users who want v0.21.0 benefits NOW (before next sync). Walks code pages in batches of 100 (Finding 4.4 OOM protection). Reuses D1's cost-preview gate. `--force` bypasses `importCodeFile`'s content_hash early-return. `src/commands/migrations/v0_21_0.ts` orchestrator: schema → backfill-prompt → verify phases. Idempotent, resumable.
+
+**Layer 11 (E1) — BrainBench code sub-category tests.** `test/cathedral-ii-brainbench.test.ts` pins `call_graph_recall` (getCallersOf round-trip through real importCodeFile, with re-import idempotency validated) and `parent_scope_coverage` (nested methods persist parent_symbol_path, qualified names resolve). `doc_comment_matching` and `type_signature_retrieval` deferred to v0.20.1 with A4 full extraction + C6 respectively.
+
+**Layer 9 (B2) — Magika auto-detect: DEFERRED to v0.20.1.** The fallback hook (`setLanguageFallback`) is in place at `src/core/chunkers/code.ts`. The `detectCodeLanguage` call order already accommodates a `null → fallback` path. Bundling the ~1MB Magika ONNX model through `bun --compile` surfaces integration risk that the plan explicitly allowed deferring. Tracked in TODOS.md.
+
+**Test coverage.** +900 lines of new test cases across 11 new test files:
+- `test/chunker-version-gate.test.ts`, `test/migrations-v0_21_0.test.ts` (Layer 1 schema + Layer 12 gate)
+- `test/sync-classifier-widening.test.ts` (Layer 2)
+- `test/chunk-grain-fts.test.ts` (Layer 3)
+- `test/language-manifest.test.ts` (Layer 4)
+- `test/qualified-names.test.ts`, `test/edge-extractor.test.ts`, `test/code-edges.test.ts` (Layer 5)
+- `test/parent-scope.test.ts` (Layer 6)
+- `test/two-pass.test.ts` (Layer 7)
+- `test/sync-cost-preview.test.ts`, `test/fence-extraction.test.ts`, `test/reconcile-links.test.ts` (Layer 8)
+- `test/search-lang-symbol-kind.test.ts`, `test/code-callers-cli.test.ts` (Layer 10)
+- `test/reindex-code.test.ts`, `test/migration-orchestrator-v0_21_0.test.ts` (Layer 13)
+- `test/cathedral-ii-brainbench.test.ts` (Layer 11)
+
+Final CI: 2407 pass / 250 skip / 0 fail / 6345 expect() / 467s.
+
+**Credit.** Plan reviewed by 2 codex passes + 1 plan-eng-review + 1 plan-ceo-review. 16 cross-model findings (7 + 6 + 3) all absorbed — notably codex SP-1 (chunker_version silent no-op), SP-2 (inbound edge invalidation across re-imports), SP-3 (multi-source tenancy), SP-4 (layer bisectability), SP-5 (slug dispatcher), SP-6 (FTS page-grain external contract), SP-7 (no promotion, UNION-on-read forever). The release's correctness on those 3 ship-silent bugs + real bisectability is directly attributable to the two codex passes on a cathedral-scale plan.
+
+## [0.19.0] - 2026-04-23
+
+## **Your code is now first-class in the brain.**
+## **`gbrain code-refs BrainEngine --json` returns every usage site in <100ms.**
+
+Until this release, gbrain was a markdown brain. An agent asking "how do we handle partial sync failures" got back the guide and the CHANGELOG post-mortem. It got nothing from the actual code. Not because the feature was missing — because the chunker treated a TypeScript file as prose. v0.19.0 makes code a first-class citizen alongside markdown: 29 languages parsed by tree-sitter into semantic chunks, each with a structured header (`[TypeScript] src/core/sync.ts:380-415 function performFullSync`), queryable by symbol name with a new `code-def` / `code-refs` command pair that ships agent-safe JSON by default.
+
+The flagship moment for the agent persona: `gbrain code-refs BrainEngine --json` returns a clean array of `{file, line, symbol_name, snippet}` tuples in under 100ms on a 25-file corpus. No grep. No full-file reads. The brain knows where BrainEngine is used, and the agent can feed the response directly into its next reasoning step. Brain-first lookup finally covers code.
+
+The cost story: daily autopilot on a 5K-file TS repo would have been ~$30/month of OpenAI embedding spend. v0.19.0's incremental chunker diffs chunks by `(chunk_index, chunk_text)` — unchanged symbols reuse their embedding, only new or edited code hits the API. Typical edit touches 2-5% of chunks, so the daily bill drops ~95% to pennies.
+
+The honest part: the chunker ships as a **strict superset of Chonkie's CodeChunker**. 29 languages (vs 6 baseline), tiktoken `cl100k_base` tokenizer for accurate budgeting (not the 2-3x-off `len/4` heuristic), small-sibling merging so 30 top-level imports don't produce 30 embedding calls, AST-aware splitting of large nodes. Tree-sitter WASMs ship embedded in the `bun --compile` binary — the silent-failure mode Codex flagged during plan review got closed by a CI guard that proves semantic chunks actually come out of the compiled binary. Every release runs it.
+
+### The numbers that matter
+
+Counted against gbrain's own codebase (~300 TypeScript files), PGLite in-memory benchmark:
+
+| Metric | v0.18.x (markdown-only) | v0.19.0 (code-aware) | Δ |
+|---|---|---|---|
+| Code indexing languages | 0 | 29 | +29 |
+| Chunk metadata columns | chunk_text only | + language, symbol_name, symbol_type, start/end_line | +5 |
+| `code-refs BrainEngine` surface | not possible | JSON array in <100ms | ∞ |
+| Daily autopilot embedding cost (5K code files, 5% churn) | ~$1.50/day naive | ~$0.05/day incremental | 30x |
+| Tokenizer accuracy vs OpenAI cl100k_base | 2-3x off (len/4) | exact (tiktoken) | tight |
+
+### What this means for builders
+
+If you build with gbrain + OpenClaw + Claude Code: add your repo as a source (`gbrain sources add gbrain --path .`) and sync with strategy=code. Ask your agent to "look at gbrain" — it gets the full symbol graph, not just the README. If you're shipping your own gstack fork on top of gbrain: your agent's brain-first lookup now covers code, which closes the largest remaining gap where agents fell back to grep. If you're Garry wondering what `performFullSync` does: `gbrain code-def performFullSync` and you get the answer without opening a file.
+
+### Itemized changes
+
+**Layer 0 — Wintermute's baseline (cherry-picked, author scrubbed).** Tree-sitter code chunker for 6 languages (TS/TSX/JS/Python/Ruby/Go), `gbrain repos add/list/remove`, strategy-aware sync, `PageType 'code'`, `importCodeFile`, per-file sync progress via the v0.15.2 reporter. Preserved exactly, committed under Garry's author identity.
+
+**Layer 1 — A6 structured errors + version bump.** New `src/core/errors.ts` exports `StructuredAgentError` + `buildError` + `serializeError`. Matches the v0.17.0 `CycleReport.PhaseResult.error` shape so agent-consumable errors stay consistent across every gbrain surface. `globToRegex` bug fix: `src/**/*.ts` now matches `src/foo.ts` (zero intermediate dirs). `GBRAIN_HOME` env var for test isolation. `package.json` → `0.19.0`.
+
+**Layer 2 — `bun --compile` WASM embedding + CI guard.** Codex flagged the node_modules-at-runtime approach as the #1 silent-failure mode for v0.19.0. Fix: WASMs committed to `src/assets/wasm/`, loaded via `import path from ... with { type: 'file' }`. Bun bundles every asset referenced this way into the compiled binary. `scripts/check-wasm-embedded.sh` compiles a smoketest binary on every `bun test` run and asserts it produces real semantic chunks. If the chunker ever silently falls through to recursive again, the build breaks.
+
+**Layer 3 — schema migrations v25 + v26.** `pages.page_kind TEXT CHECK (page_kind IN ('markdown','code'))` on v25, using Postgres's `NOT VALID` + `VALIDATE CONSTRAINT` split so tables with millions of pages don't hold a write lock during the ALTER. `content_chunks` adds `language`, `symbol_name`, `symbol_type`, `start_line`, `end_line` on v26, plus partial indexes keyed on non-null values so code-chunk lookups stay cheap on mixed markdown+code brains.
+
+**Layer 4 — delete Wintermute's multi-repo, wire v0.18.0 sources.** The `repos` abstraction in Wintermute's baseline turned out to be redundant with v0.18.0's `sources` subsystem (per-source `last_commit`, `federated` search config, RLS-friendly, DB-native). v0.19.0 keeps `gbrain repos` as a deprecated alias that routes into `runSources`. `sync --all` iterates the `sources` table instead of a local config array. Codex's P0 #2 (per-repo sync bookmarks) and P0 #3 (slug collision) both resolved by the existing schema.
+
+**Layer 5 — Chonkie chunker parity (E2a).** 6 languages → 29. Embedded asset paths for every grammar in `tree-sitter-wasms`. Accurate tokenizer via `@dqbd/tiktoken` `cl100k_base` (lazy-init). Small-sibling merging with the Chonkie `bisect_left` pattern tuned to 15% of chunk target, so tiny siblings (imports, single-line consts) collapse while substantive classes/functions stay independent. `CHUNKER_VERSION=3` folded into `importCodeFile`'s `content_hash` so chunker-shape changes across releases force clean re-chunks without `sync --force`.
+
+**Layer 6 — incremental chunking (E2) + doc↔impl linking (E1).** `importCodeFile` reads existing chunks before embedding; any chunk whose `(chunk_index, chunk_text)` matches verbatim reuses the existing embedding, saving the OpenAI call. `extractCodeRefs` in `link-extraction.ts` scans markdown prose for references like `src/core/sync.ts:42`; `importFromContent` creates bidirectional `documents` / `documented_by` edges for every match. The agent can now walk from guide to code and back.
+
+**Layer 7 — `code-def` + `code-refs` CLI surfaces.** The magical-moment commands. Both bypass the standard `searchKeyword` path (DISTINCT ON (slug) collapses to one result per page — wrong for code-refs). Auto-JSON when stdout is not a TTY (gh-CLI convention). Structured error envelope for the usage-error + catch-all paths. `--lang` / `--limit` / `--json` / `--no-json` flags across both commands.
+
+**Layer 8 — BrainBench code category (E2E).** 11-test E2E suite against PGLite in-memory, 5 languages × 5 service files = 25-file fictional corpus, asserts `code-def` and `code-refs` retrieval quality plus the <100ms magical-moment budget. Reproducible on CI without OpenAI keys (embeddings disabled — tests cover retrieval metadata, not vector quality).
+
+**Test coverage.** 91 new unit + E2E tests across 9 new files: `test/errors.test.ts`, `test/sync-strategy.test.ts`, `test/migrations-v0_19_0.test.ts`, `test/repos-alias.test.ts`, `test/chunkers/code.test.ts`, `test/link-extraction-code-refs.test.ts`, `test/incremental-chunking.test.ts`, `test/code-def-refs.test.ts`, `test/e2e/code-indexing.test.ts`. 357 assertions, all green against PGLite.
+
+**Credit.** Baseline tree-sitter chunker + multi-repo scaffolding came from a community PR (author scrubbed per the privacy rule). The v0.19.0 rework on top — cathedral scope, Chonkie parity, doc↔impl linking, incremental chunking, the sources reconciliation, and the full test suite — was driven by the /plan-ceo-review + /plan-devex-review + /plan-eng-review + /codex review chain. Codex's outside-voice pass caught 4 P0s (baseline-not-in-tree, per-repo bookmarks, slug collision, chunk schema gap) that the in-model reviews missed. All 4 are fixed in the ship.
+
+## To take advantage of v0.19.0
+
+`gbrain upgrade` runs `apply-migrations` which lands v25 + v26 automatically. If `gbrain doctor` warns about a partial migration:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Add your code repo as a source and sync:**
+   ```bash
+   gbrain sources add my-repo --path /path/to/repo
+   gbrain sync --source my-repo
+   ```
+   (Or `gbrain repos add my-repo --path ...` — the deprecated alias still works.)
+3. **Verify code indexing works:**
+   ```bash
+   gbrain code-def BrainEngine
+   gbrain code-refs BrainEngine --json
+   ```
+4. **Observe the cost delta.** After a full sync, run an `autopilot` cycle. Incremental chunking means the second cycle's embedding cost is ~5% of the first.
+5. **If the compiled binary produces no symbol names** (everything falls to recursive chunks): your install may have skipped the WASM assets. File an issue with `gbrain doctor` output.
+
 ## [0.20.4] - 2026-04-24
 
 **Minions skill consolidation, now honest about what the CLI actually does.**
@@ -442,108 +646,6 @@ For gbrain-evals consumers:
 - Doctor's `resolver_health` check now passes on fresh installs: `skills/smoke-test/` is wired into `RESOLVER.md` so the cascade that was flagging it unreachable (and dragging `gbrain doctor` to exit 1 on healthy brains) no longer fires.
 - `skills/smoke-test/SKILL.md` gains the required `## Anti-Patterns` and `## Output Format` sections, so `test/skills-conformance.test.ts` no longer flags it.
 - `llms-full.txt` regenerated to reflect the new RESOLVER row. The drift guard in `test/build-llms.test.ts` now passes.
-
-## [0.19.0] - 2026-04-22
-
-## **Your OpenClaw finally learns. Say "skillify it!" and every new failure becomes a durable skill.**
-## **AGENTS.md workspaces work out of the box. `gbrain skillpack install` drops 25 curated skills into your OpenClaw.**
-
-Your agent can now turn any ad-hoc fix into a permanent skill with tests, routing evals, and filing audits. The workflow that was aspirational for months is a real CLI: scaffold the stubs, write the logic, run one check that verifies the whole 10-step checklist. Your OpenClaw stops making the same mistake twice.
-
-Four new commands and a lot of polish on the existing ones. `gbrain check-resolvable` now works against AGENTS.md workspaces (not just RESOLVER.md ones), so the 107-skill deployment you actually run is finally inspectable. New `gbrain skillify scaffold` creates all the stubs for a new skill in one command. New `gbrain skillpack install` copies gbrain's curated 25-skill bundle into your workspace, managed-block style, never clobbering your local edits. New `gbrain routing-eval` surfaces which user phrasings route to the wrong skill.
-
-### The numbers that matter
-
-Measured live against a real OpenClaw deployment with 107 skills, `AGENTS.md` at workspace root, no `manifest.json`:
-
-| Capability | Before v0.19 | After v0.19 |
-|---|---|---|
-| `gbrain check-resolvable` against an AGENTS.md workspace | `RESOLVER.md not found`, exit 2 | detects 102 skills, 15 unreachable errors, 108 advisory warnings |
-| Unreachable skills surfaced by first run | 0 (check never ran) | 15 (≈15% of the tree was dark) |
-| `gbrain skillify` as a CLI verb | didn't exist | `scaffold` + `check` subcommands |
-| `gbrain skillpack install` | didn't exist | 25 curated skills, dependency closure, file-lock + atomic managed block |
-| `gbrain routing-eval` | didn't exist | structural (default) + `--llm` layer for CI gating |
-| Warnings break CI by default | yes (any issue → exit 1) | no (warnings advisory; `--strict` opts in) |
-
-Running `skillify scaffold webhook-verify --description "..." --triggers "..."` writes 4 stub files + appends an idempotent resolver row in under 2 seconds. The real work (your rule, your script, your tests) is what you spend time on afterward — not the boilerplate.
-
-### What this means for your workflow
-
-Your agent says "skillify it!" and runs five commands:
-
-1. `gbrain skillify scaffold <name> --description "..." --triggers "..."` — creates SKILL.md, script stub, routing-eval fixture, test skeleton, resolver row
-2. Replace the `SKILLIFY_STUB` sentinels with real logic + real tests
-3. `gbrain skillify check skills/<name>/scripts/<name>.mjs` — 10-item audit
-4. `gbrain check-resolvable` — reachability + routing + filing + DRY + stub-sentinel gate
-5. `bun test test/<name>.test.ts`
-
-Four of the five take under a second. The script stops shipping unless you replace its `SKILLIFY_STUB` marker, so scaffolded-but-forgotten skills can't slip past `check-resolvable --strict`.
-
-For downstream OpenClaw deployments: `gbrain skillpack install --all` copies the bundled skills into `$OPENCLAW_WORKSPACE`. Per-file diff protection never overwrites your local edits without `--overwrite-local`. The managed block in your AGENTS.md tells you exactly what gbrain installed so you can see it at a glance.
-
-## To take advantage of v0.19.0
-
-`gbrain upgrade` does this automatically. To verify:
-
-1. **Binary version:**
-   ```bash
-   gbrain --version   # should say 0.19.0
-   ```
-2. **New commands:**
-   ```bash
-   gbrain check-resolvable --help | grep -- '--strict'
-   gbrain routing-eval --help
-   gbrain skillify --help
-   gbrain skillpack --help
-   ```
-3. **For AGENTS.md-native OpenClaw deployments:**
-   ```bash
-   export OPENCLAW_WORKSPACE=~/your-openclaw/workspace
-   gbrain check-resolvable           # human output, warnings advisory
-   gbrain check-resolvable --strict  # warnings block CI
-   ```
-4. **For skills you author:** add `routing-eval.jsonl` fixtures and `writes_pages: true` + `writes_to:` frontmatter as you touch each skill. Filing audit is warning-only in v0.19 and escalates to error in v0.20.
-5. **If anything fails,** file an issue at https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor` and `gbrain check-resolvable --json`.
-
-No schema migration. Existing brains work unchanged.
-
-### Itemized changes
-
-#### Added
-
-- **`gbrain skillify scaffold <name>`** — creates SKILL.md, script stub, routing-eval fixture, and test skeleton, plus an idempotent trigger row in your resolver. Re-running with `--force` never appends a duplicate row. Every scaffold carries a `SKILLIFY_STUB` sentinel that `check-resolvable --strict` rejects until replaced.
-- **`gbrain skillify check [path]`** — 10-item post-task audit (promoted from `scripts/skillify-check.ts`; the legacy script remains as a shim).
-- **`gbrain skillpack list`** — prints the curated bundle (25 skills) shipped with gbrain.
-- **`gbrain skillpack install <name>` / `--all`** — copies bundled skills into the target workspace. Automatically pulls shared convention files so nothing references a missing dep. Per-file diff protection, `--overwrite-local` escape hatch, `.gbrain-skillpack.lock` against concurrent installers, atomic managed-block update to AGENTS.md / RESOLVER.md.
-- **`gbrain skillpack diff <name>`** — per-file diff preview before install.
-- **`gbrain routing-eval`** — dedicated CI verb that runs routing fixtures (`skills/<name>/routing-eval.jsonl`) and surfaces intent-to-skill mismatches, ambiguous routing, and false positives. Default structural layer runs alongside `check-resolvable`; `--llm` opts into an LLM tie-break layer.
-- **`gbrain check-resolvable --strict`** — opt-in CI mode that promotes warnings to failures.
-- **`skills/_brain-filing-rules.json`** — machine-readable canonical filing rules (JSON sidecar to the prose `_brain-filing-rules.md`).
-- **`writes_pages: true` + `writes_to: [...]`** — new skill frontmatter fields consumed by the filing audit. Distinct from `mutating:` so cron schedulers and report writers aren't dragged into filing checks.
-- **`SKILLIFY_STUB` sentinel check** — new type in `check-resolvable` that flags scaffolded scripts whose stubs haven't been replaced.
-
-#### Changed
-
-- **`gbrain check-resolvable` accepts `AGENTS.md` as a resolver file** alongside `RESOLVER.md`, at either the skills directory or one level up (workspace root). Auto-detects via `$OPENCLAW_WORKSPACE`, `~/.openclaw/workspace`, repo root, or `./skills`. Explicit `$OPENCLAW_WORKSPACE` wins over the repo-root walk.
-- **Auto-derives the skill manifest** by walking `skills/*/SKILL.md` when `manifest.json` is missing. OpenClaw deployments that never shipped a manifest now get real reachability checks instead of silent empty passes.
-- **`ResolvableReport` split into `errors[]` + `warnings[]`** so advisory findings (filing audit, routing gaps, DRY violations) don't break CI by default. The deprecated `issues[]` union remains for one release.
-- **`openclaw.plugin.json`** refreshed: version 0.19.0, 25 curated skills, new `shared_deps` declaration for convention files, new `excluded_from_install` for skills that shouldn't be dropped into other workspaces.
-- **`gbrain skillpack-check`** is now also reachable as `gbrain skillpack check` under the new namespace.
-- **`scripts/skillify-check.ts`** reduced to a thin shim that delegates to `gbrain skillify check`.
-
-#### Fixed
-
-- `check-resolvable` stopped silently passing on workspaces that lacked `manifest.json`. The reachability check now sees every skill on disk.
-- Parallel `skillpack install` runs no longer race on the AGENTS.md managed block; the file-lock serializes writers and managed-block updates use tmp-file-plus-rename.
-
-### For contributors
-
-- New core modules: `src/core/resolver-filenames.ts`, `src/core/skill-manifest.ts`, `src/core/routing-eval.ts`, `src/core/filing-audit.ts`, `src/core/skillify/{templates,generator}.ts`, `src/core/skillpack/{bundle,installer}.ts`.
-- New command modules: `src/commands/routing-eval.ts`, `src/commands/skillify.ts`, `src/commands/skillify-check.ts`, `src/commands/skillpack.ts`.
-- `scripts/check-privacy.sh` — pre-commit / CI guard enforcing the private-fork-name ban in public artifacts.
-- Test fixture at `test/fixtures/openclaw-reference-minimal/` (4 skills + workspace-root AGENTS.md) plus `test/e2e/openclaw-reference-compat.test.ts` exercises the full AGENTS.md + skillpack install stack. `test/regression-v0_16_4.test.ts` locks the pre-v0.19 `checkResolvable` envelope shape. `test/skillpack-sync-guard.test.ts` asserts `openclaw.plugin.json#skills` stays a subset of `skills/manifest.json`.
-
----
 
 ## [0.18.2] - 2026-04-23
 
