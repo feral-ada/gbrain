@@ -1,7 +1,7 @@
 /**
- * v0.20.0 Cathedral II Layer 13 (E2) — `gbrain reindex-code`.
+ * v0.21.0 Cathedral II Layer 13 (E2) — `gbrain reindex-code`.
  *
- * Explicit backfill for v0.19.0 → v0.20.0 brains. Layer 12's
+ * Explicit backfill for v0.19.0 → v0.21.0 brains. Layer 12's
  * `sources.chunker_version` gate forces a re-walk next sync on any source
  * whose working tree hasn't drifted, but users who want the benefits NOW
  * (before the next sync) get this: walk every page where type='code', read

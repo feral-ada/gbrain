@@ -1,6 +1,6 @@
 # TODOS
 
-## code-indexing (v0.20.0 Cathedral II follow-ups)
+## code-indexing (v0.21.0 Cathedral II follow-ups)
 
 ### B2 — Magika auto-detect for extension-less files (Layer 9 deferred)
 **Priority:** P2
@@ -65,60 +65,56 @@
 
 **Depends on / blocked by:** Nothing — UNION-on-read path keeps unresolved edges surfaced even without this.
 
-## check-resolvable
+## Completed
 
-### File tracking issues for Checks 5 + 6 (deferred in PR #325)
-**Priority:** P2
+### ~~Checks 5 + 6 for check-resolvable~~
+**Completed:** v0.19.0 (2026-04-22)
 
-**What:** `src/commands/check-resolvable.ts` currently points `DEFERRED[].issue` at GitHub issue search URLs (`?q=TBD-check-5`, `?q=TBD-check-6`). File real tracking issues and grep-replace both placeholders with the real URLs.
+Both checks shipped as real implementations, not just filed issues:
+- **Check 5 (trigger routing eval):** `src/core/routing-eval.ts` + `gbrain routing-eval` CLI. Structural layer runs in `check-resolvable` by default; `--llm` opts into LLM tie-break. Fixtures live at `skills/<name>/routing-eval.jsonl`.
+- **Check 6 (brain filing):** `src/core/filing-audit.ts` + `skills/_brain-filing-rules.json`. New `writes_pages:` + `writes_to:` frontmatter. Warning-only in v0.19, error in v0.20.
 
-**Why:** v0.16.4 shipped `gbrain check-resolvable` with 4 of the 6 checks from the original spec. Checks 5 (trigger routing eval) and 6 (brain filing) were explicitly deferred during plan-ceo-review because they each need new detection logic. The CLI's `deferred[]` JSON field is meant to surface these to agents so they know the coverage boundary — the TBD placeholders do the right thing mechanically but aren't clickable.
+`DEFERRED[]` in `src/commands/check-resolvable.ts` is now empty — v0.19 shipped both deferred checks as working code paths, not as issue URLs. The export stays in place for future deferred checks.
 
-**How:**
-1. `gh issue create -t "check-resolvable Check 5: trigger routing eval" -b "..."` — detection: every skill's own frontmatter trigger should match the RESOLVER.md entry pointing at that skill. Needs new issue type (e.g. `mis_route`).
-2. `gh issue create -t "check-resolvable Check 6: brain filing validation" -b "..."` — detection: scan SKILL.md body for brain paths (e.g., `brain/people/`, `brain/companies/`), cross-reference with `skills/_brain-filing-rules.md`. Flag mutating skills missing entries.
-3. Replace `TBD-check-5` and `TBD-check-6` in `src/commands/check-resolvable.ts` with the real issue URLs.
+### ~~BrainBench Cats 5/6/8/9/11 — shipped to sibling repo~~
+**Completed:** v0.20.0 (2026-04-23)
 
-**Effort:** ~15 min mechanical (issue filing + grep-replace). Implementation of the checks themselves is a separate, larger piece of work — the TODO here is just the issue filing + URL swap.
+All five previously-deferred BrainBench categories shipped as working runners
+in the sibling repo [github.com/garrytan/gbrain-evals](https://github.com/garrytan/gbrain-evals):
 
-## P1 (BrainBench v1.1 — categories deferred from PR #188)
+- **Cat 5 Provenance** — `eval/runner/cat5-provenance.ts` with dedicated `classify_claim` tool (3-way label: `supported | unsupported | over-generalized`)
+- **Cat 6 Prose-scale auto-link precision** — `eval/runner/cat6-prose-scale.ts` (baseline-only) + `eval/runner/adversarial-injections.ts` (6 injection kinds)
+- **Cat 8 Skill Compliance** — `eval/runner/cat8-skill-compliance.ts` (brain-first / back-link / citation-format / tier-escalation, deterministic from tool-bridge trace)
+- **Cat 9 End-to-End Workflows** — `eval/runner/cat9-workflows.ts` (rubric-graded)
+- **Cat 11 Multi-modal Ingestion** — `eval/runner/cat11-multimodal.ts` (PDF/audio/HTML)
 
-### BrainBench Cat 5: Source Attribution / Provenance
-**What:** Eval that gbrain correctly cites the right page when claiming fact F, and resolves source-conflict cases (3 sources disagree on $5M raise — which wins?). 200 queries across citation/provenance/conflict sub-categories on a 300-entity dataset with deliberately-conflicting sources.
+Plus supporting infrastructure: agent adapter (Sonnet + 12 read + 3 dry_run tools),
+structured-evidence Haiku judge contract, PublicPage/PublicQuery sealed qrels,
+6-artifact flight-recorder, 6 portable JSON schemas for v1→v2 driver swap.
 
-**Why deferred from PR #188:** Needs ~$100-200 of Opus tokens to generate the conflict-graph dataset. v1 scope was procedural-only.
+Scope pivot: originally planned for in-tree v1.1 delta; mid-PR pivoted to extract
+the entire eval harness so gbrain users don't download the ~5MB corpus at install
+time. BrainBench is now a public sibling benchmark; gbrain ships clean.
 
-**Threshold:** citation_recall > 90%, citation_precision > 85%, conflict_resolution > 70%.
+### ~~v0.10.5: inferLinkType residuals (works_at, advises)~~
+**Completed:** v0.20.0 (2026-04-23)
 
-**Depends on:** Identity Resolution (Cat 3) shipped — uses same world generator pattern.
+`src/core/link-extraction.ts` — WORKS_AT_RE and ADVISES_RE expanded with
+rank-prefixed engineer patterns ("senior/staff/principal/lead engineer at"),
+discipline-prefixed ("backend/frontend/ML/security engineer at"), broader role
+verbs ("manages engineering at", "running product at", "heads up X at"),
+possessive time ("his/her/their time at"), role-noun forms ("tenure as",
+"stint as", "role at"), advisory capacity phrasings, "as an advisor" forms,
+and qualifier-specific advisors. New EMPLOYEE_ROLE_RE prior fires for
+self-identified employees at the page level, biasing outbound company refs
+toward works_at when per-edge verbs are absent. Precedence: investor > advisor
+> employee. Existing tests in `test/link-extraction.test.ts` cover the new
+patterns.
 
-### BrainBench Cat 6: Auto-link Precision under Prose (at scale)
-**What:** Cat 10 (Robustness/Adversarial) covered code-fence leak and false-positive substrings on 22 hand-crafted cases. v1.1 extends this to 500+ prose-heavy pages with realistic narrative noise. Tests link precision in the wild, not just edge cases.
+## P1 (BrainBench v1.1 — remaining categories)
 
-**Why deferred from PR #188:** Needs prose-heavy generated corpus (~$100-150 Opus). Existing 22-case eval already caught + fixed the code-fence leak bug.
-
-**Threshold:** link_precision > 95% on prose, type_accuracy > 80% on varied phrasing.
-
-### BrainBench Cat 8: Skill Behavior Compliance
-**What:** Replays 100 inbound signals through a real LLM agent loop with gbrain skills loaded. Measures: brain-first lookup compliance, back-link iron-law adherence, citation format compliance, tier escalation correctness.
-
-**Why deferred:** Needs real LLM API loop (~$2K total — most expensive single category).
-
-**Threshold:** brain_first_compliance > 95%, back_link_compliance > 90%, citation_format > 95%.
-
-### BrainBench Cat 9: End-to-End Workflows
-**What:** 50 end-to-end scenarios across meeting ingestion, email-to-brain, daily-task-prep, briefing generation, sync cycle. Rubric-graded (10-15 criteria each).
-
-**Why deferred:** Needs LLM agent loop (~$1K). Plus 50 hand-built rubrics.
-
-**Threshold:** 80% scenario pass rate per workflow.
-
-### BrainBench Cat 11: Multi-modal Ingestion
-**What:** PDF/image/audio/video ingestion accuracy. 50 PDFs, 30 images, 20 audio files, 10 videos, 30 HTML pages. Per-modality recall and fidelity metrics.
-
-**Why deferred:** Needs licensed real datasets (Common Voice for audio etc.). Dataset curation is the bulk of the work.
-
-**Threshold:** PDF text fidelity > 95% (text-based) / > 80% (scanned), audio WER < 15%, entity_recall > 80% post-ingestion.
+Cats 5/6/8/9/11 shipped to the sibling repo in v0.20.0 — see the Completed
+section above. One remaining scope item:
 
 ### BrainBench Cat 1+2 at full scale
 **What:** Existing benchmark-search-quality.ts (29 pages, 20 queries) and benchmark-graph-quality.ts (80 pages, 5 queries) currently pass at small scale. v1.1 extends both to 2-3K rich-prose pages generated via Opus to surface scale-dependent failures (tied keyword clusters, hub-node fan-out, prose-noise extraction precision).
@@ -137,24 +133,6 @@ person-page role prior (partner-bio language → invested_in for outbound
 company refs only). Per-type after fix: invested_in 91.7% (was 0%),
 mentions 100%, attended 100%. works_at 58% and advises 41% are next
 iteration's residuals.
-
-### v0.10.5: inferLinkType residuals (works_at, advises)
-**What:** After the v0.10.4 fix, two link types still under-perform on rich
-prose. Drive these to >85% type accuracy in next iteration.
-
-**works_at: 58% type accuracy.** Engineer/employee pages use varied phrasings
-the regex doesn't catch ("spent some time at", "joined the team", narrative
-"is currently at" without a verb). Approach: extend WORKS_AT_RE; consider
-employee-role page prior similar to partner prior.
-
-**advises: 41% type accuracy.** Advisor pages often describe board roles
-without using the word "advisor" explicitly ("on Beta Health's board",
-"joined Beta as a board member"). The v0.10.4 fix tightened ADVISES_RE to
-require "advisor" rooting to avoid false positives from investors. Need
-a tighter signal that distinguishes "advisor on board" from "investor on
-board" — likely an advisor-role page prior plus verb-pattern combinations.
-
-**Threshold:** Cat 2 rich-prose type accuracy > 92% (currently 88.5%).
 
 ### v0.10.4: gbrain alias resolution feature (driven by Cat 3)
 **What:** Add an alias table to gbrain so "Sarah Chen" / "S. Chen" / "@schen" / "sarah.chen@example.com" resolve to one canonical entity. Schema: `aliases (id, slug, alias_text)` with a unique index. Search blends alias matches into hybrid scoring.

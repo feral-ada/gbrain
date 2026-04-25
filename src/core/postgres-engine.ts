@@ -1282,19 +1282,20 @@ export class PostgresEngine implements BrainEngine {
   ): Promise<import('./types.ts').CodeEdgeResult[]> {
     const sql = this.sql;
     const limit = Math.min(opts?.limit ?? 100, 500);
-    const scoped = !opts?.allSources && opts?.sourceId;
+    const scopedSource: string | null =
+      !opts?.allSources && opts?.sourceId ? opts.sourceId : null;
     const rows = await sql`
       SELECT id, from_chunk_id, to_chunk_id, from_symbol_qualified, to_symbol_qualified,
              edge_type, edge_metadata, source_id, true as resolved
         FROM code_edges_chunk
         WHERE to_symbol_qualified = ${qualifiedName}
-        ${scoped ? sql`AND source_id = ${opts!.sourceId}` : sql``}
+        ${scopedSource ? sql`AND source_id = ${scopedSource}` : sql``}
       UNION ALL
       SELECT id, from_chunk_id, NULL::int as to_chunk_id, from_symbol_qualified, to_symbol_qualified,
              edge_type, edge_metadata, source_id, false as resolved
         FROM code_edges_symbol
         WHERE to_symbol_qualified = ${qualifiedName}
-        ${scoped ? sql`AND source_id = ${opts!.sourceId}` : sql``}
+        ${scopedSource ? sql`AND source_id = ${scopedSource}` : sql``}
       LIMIT ${limit}
     `;
     return rows.map(r => pgRowToCodeEdge(r as Record<string, unknown>));
@@ -1306,19 +1307,20 @@ export class PostgresEngine implements BrainEngine {
   ): Promise<import('./types.ts').CodeEdgeResult[]> {
     const sql = this.sql;
     const limit = Math.min(opts?.limit ?? 100, 500);
-    const scoped = !opts?.allSources && opts?.sourceId;
+    const scopedSource: string | null =
+      !opts?.allSources && opts?.sourceId ? opts.sourceId : null;
     const rows = await sql`
       SELECT id, from_chunk_id, to_chunk_id, from_symbol_qualified, to_symbol_qualified,
              edge_type, edge_metadata, source_id, true as resolved
         FROM code_edges_chunk
         WHERE from_symbol_qualified = ${qualifiedName}
-        ${scoped ? sql`AND source_id = ${opts!.sourceId}` : sql``}
+        ${scopedSource ? sql`AND source_id = ${scopedSource}` : sql``}
       UNION ALL
       SELECT id, from_chunk_id, NULL::int as to_chunk_id, from_symbol_qualified, to_symbol_qualified,
              edge_type, edge_metadata, source_id, false as resolved
         FROM code_edges_symbol
         WHERE from_symbol_qualified = ${qualifiedName}
-        ${scoped ? sql`AND source_id = ${opts!.sourceId}` : sql``}
+        ${scopedSource ? sql`AND source_id = ${scopedSource}` : sql``}
       LIMIT ${limit}
     `;
     return rows.map(r => pgRowToCodeEdge(r as Record<string, unknown>));
@@ -1346,7 +1348,7 @@ export class PostgresEngine implements BrainEngine {
     `;
     let symbolRows: unknown[] = [];
     if (direction !== 'in') {
-      symbolRows = await sql`
+      const sRows = await sql`
         SELECT id, from_chunk_id, NULL::int as to_chunk_id, from_symbol_qualified, to_symbol_qualified,
                edge_type, edge_metadata, source_id, false as resolved
           FROM code_edges_symbol
@@ -1354,6 +1356,7 @@ export class PostgresEngine implements BrainEngine {
             ${typeFilter ? sql`AND edge_type = ${typeFilter}` : sql``}
           LIMIT ${limit}
       `;
+      symbolRows = [...sRows];
     }
     return [...chunkRows, ...symbolRows].map(r => pgRowToCodeEdge(r as Record<string, unknown>));
   }
