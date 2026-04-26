@@ -19,7 +19,7 @@ for (const op of operations) {
 }
 
 // CLI-only commands that bypass the operation layer
-const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'skillpack', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'dream', 'check-resolvable', 'routing-eval', 'skillify', 'smoke-test', 'repos', 'code-def', 'code-refs', 'reindex-code', 'code-callers', 'code-callees']);
+const CLI_ONLY = new Set(['init', 'upgrade', 'post-upgrade', 'check-update', 'integrations', 'publish', 'check-backlinks', 'lint', 'report', 'import', 'export', 'files', 'embed', 'serve', 'call', 'config', 'doctor', 'migrate', 'eval', 'sync', 'extract', 'features', 'autopilot', 'graph-query', 'jobs', 'agent', 'apply-migrations', 'skillpack-check', 'skillpack', 'resolvers', 'integrity', 'repair-jsonb', 'orphans', 'sources', 'dream', 'check-resolvable', 'routing-eval', 'skillify', 'smoke-test', 'repos', 'code-def', 'code-refs', 'reindex-code', 'code-callers', 'code-callees', 'frontmatter']);
 
 async function main() {
   // Parse global flags (--quiet / --progress-json / --progress-interval)
@@ -303,6 +303,11 @@ async function handleCliOnly(command: string, args: string[]) {
   if (command === 'check-backlinks') {
     const { runBacklinks } = await import('./commands/backlinks.ts');
     await runBacklinks(args);
+    return;
+  }
+  if (command === 'frontmatter') {
+    const { runFrontmatter } = await import('./commands/frontmatter.ts');
+    await runFrontmatter(args);
     return;
   }
   if (command === 'lint') {
