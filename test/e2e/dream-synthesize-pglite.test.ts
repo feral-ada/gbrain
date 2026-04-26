@@ -185,6 +185,7 @@ describe('E2E synthesize — cooldown', () => {
   });
 
   test('explicit --input bypasses cooldown', async () => {
+    // Two engine setups + a synth run; default 5s is tight under full-suite pressure.
     const rig = await setupRig();
     try {
       await rig.engine.setConfig('dream.synthesize.enabled', 'true');
@@ -208,11 +209,12 @@ describe('E2E synthesize — cooldown', () => {
     } finally {
       await rig.cleanup();
     }
-  });
+  }, 30_000);
 });
 
 describe('E2E synthesize — verdict cache (Q-2)', () => {
   test('subsequent run with same content reads from dream_verdicts cache', async () => {
+    // Two synth runs through the verdict-cache path; default 5s is tight.
     const rig = await setupRig();
     try {
       await rig.engine.setConfig('dream.synthesize.enabled', 'true');
@@ -240,5 +242,5 @@ describe('E2E synthesize — verdict cache (Q-2)', () => {
     } finally {
       await rig.cleanup();
     }
-  });
+  }, 30_000);
 });
