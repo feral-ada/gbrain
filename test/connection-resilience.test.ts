@@ -262,3 +262,53 @@ describe('Supervisor health check failure tracking', () => {
     expect(consecutiveFailures).toBeLessThan(3);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────
+// Eng-review D3 regression guards — executeRaw retry wrapper dropped
+// ─────────────────────────────────────────────────────────────────
+//
+// The original #406 wrapped PostgresEngine.executeRaw in a per-call
+// try/catch that retried on connection errors. Eng-review D3 dropped
+// that wrapper as unsound (regex idempotence boundary doesn't hold
+// for writable CTEs or side-effecting SELECTs). Recovery now happens
+// at the supervisor level via the 3-strikes-then-reconnect path.
+//
+// These guards prevent reintroduction of the per-call retry without
+// a typed-idempotency boundary.
+
+import { readFileSync } from 'fs';
+import { resolve } from 'path';
+
+describe('Eng-review D3 — executeRaw has no per-call retry wrapper', () => {
+  it('PostgresEngine.executeRaw is a single-statement passthrough (no try/catch on connection errors)', () => {
+    const src = readFileSync(resolve('src/core/postgres-engine.ts'), 'utf-8');
+
+    // Find the executeRaw method in the class (not the helper inside withReservedConnection)
+    // Pattern: must be a method on the class taking (sql, params)
+    const fnMatch = src.match(/async executeRaw<T = Record<string, unknown>>\(sql: string, params\?: unknown\[\]\): Promise<T\[\]> \{([\s\S]*?)\n  \}/);
+    expect(fnMatch).not.toBeNull();
+    const body = fnMatch![1];
+
+    // Must not have any try/catch
+    expect(body).not.toContain('try {');
+    expect(body).not.toContain('catch');
+    // Must not call reconnect() from this method
+    expect(body).not.toContain('this.reconnect()');
+    // Must call conn.unsafe directly
+    expect(body).toContain('conn.unsafe(');
+  });
+
+  it('PostgresEngine.reconnect() still exists for supervisor-driven recovery', () => {
+    const src = readFileSync(resolve('src/core/postgres-engine.ts'), 'utf-8');
+    expect(src).toContain('async reconnect()');
+    expect(src).toContain('await this.disconnect()');
+  });
+
+  it('Supervisor still has the 3-strikes-then-reconnect path', () => {
+    const src = readFileSync(resolve('src/core/minions/supervisor.ts'), 'utf-8');
+    expect(src).toContain('consecutiveHealthFailures');
+    // Supervisor invokes reconnect via a typed cast after 3 consecutive failures.
+    expect(src).toMatch(/reconnect\(\): Promise<void>/);
+    expect(src).toContain('this.consecutiveHealthFailures >= 3');
+  });
+});
