@@ -5,6 +5,7 @@ import { checkResolvable } from '../core/check-resolvable.ts';
 import { autoFixDryViolations, type AutoFixReport, type FixOutcome } from '../core/dry-fix.ts';
 import { findRepoRoot } from '../core/repo-root.ts';
 import { loadCompletedMigrations } from '../core/preferences.ts';
+import { compareVersions } from './migrations/index.ts';
 import { createProgress, startHeartbeat, type ProgressReporter } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 import type { DbUrlSource } from '../core/config.ts';
@@ -110,6 +111,15 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
   // Typical cause: v0.11.0 stopgap wrote a partial record but nobody ran
   // `gbrain apply-migrations --yes` afterward. This check fires on every
   // `gbrain doctor` invocation so your OpenClaw's health skill catches it.
+  //
+  // Forward-progress override: a partial entry for vX.Y.Z is treated as
+  // stale (not stuck) if there is a `complete` entry for any vA.B.C >= vX.Y.Z
+  // anywhere in the file. The reasoning: if a newer migration successfully
+  // landed, the install moved past the older partial — the old record is
+  // historical noise from a stopgap that never finished cleanly, but the
+  // schema clearly advanced. Without this, every install that went through
+  // a v0.11.0 stopgap and then upgraded carries the "MINIONS HALF-INSTALLED"
+  // flag forever, even on installs that have been at v0.22+ for months.
   try {
     const completed = loadCompletedMigrations();
     const byVersion = new Map<string, { complete: boolean; partial: boolean }>();
@@ -119,8 +129,17 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
       if (entry.status === 'partial') seen.partial = true;
       byVersion.set(entry.version, seen);
     }
+    const completedVersions = Array.from(byVersion.entries())
+      .filter(([, s]) => s.complete)
+      .map(([v]) => v);
     const stuck = Array.from(byVersion.entries())
-      .filter(([, s]) => s.partial && !s.complete)
+      .filter(([v, s]) => {
+        if (!s.partial || s.complete) return false;
+        // Forward-progress override: if any version >= v has completed, the
+        // partial is stale. compareVersions returns 1 when first arg is newer.
+        const supersededBy = completedVersions.find(cv => compareVersions(cv, v) >= 0);
+        return supersededBy === undefined;
+      })
       .map(([v]) => v);
     if (stuck.length > 0) {
       checks.push({
