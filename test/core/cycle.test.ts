@@ -522,7 +522,9 @@ describe('runCycle — sourceId resolution (regression #475)', () => {
         ('second', 'second', '/tmp/brain-475-e')`,
     );
     await runCycle(sharedEngine, { brainDir: '/tmp/brain-475-e' });
-    expect(['first', 'second']).toContain(syncCalls.at(-1)?.sourceId);
+    const sourceId = syncCalls.at(-1)?.sourceId;
+    expect(sourceId).toBeDefined();
+    expect(['first', 'second']).toContain(sourceId as string);
   });
 
   test('empty-string id row → resolver propagates as "" (defensive)', async () => {
