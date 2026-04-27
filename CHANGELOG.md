@@ -2,6 +2,89 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.22.5] - 2026-04-27
+
+## **Autopilot stops re-importing your whole brain when a commit gets garbage-collected.**
+## **Cycle reads the per-source `sources.last_commit` anchor instead of the drift-prone global key.**
+
+`gbrain dream` and the `autopilot-cycle` worker were calling `performSync()` without `sourceId`, so sync read the global `config.sync.last_commit` key. When that commit gets GC'd from git history (a force push, a squash, an `--amend` chain), `git cat-file -t <anchor>` fails, sync concludes "force push happened," and triggers a full reimport of every page. On a 78K-page brain that's ~30 minutes per cycle, the autopilot job hits its timeout, dead-letters, and the next cron tick does it again. Production OpenClaw deployment hit exactly this pattern: every cycle ran the full reimport while the per-source `sources.last_commit` (`00a62e50`) was a valid HEAD ancestor the entire time.
+
+v0.22.5 threads `sourceId` through the cycle. `runPhaseSync()` now resolves the brain directory against the `sources` table (`SELECT id FROM sources WHERE local_path = $1`) and passes the result to `performSync()`. When a source row matches, sync reads `sources.last_commit` (per-source, always written back on every successful sync). When no row matches (pre-v0.18 brain or never-registered path), it falls through to the global key ... fully backward compatible. Six new regression tests pin the resolver behavior, including the table-missing fallback for old brains and the empty-string-id defensive case.
+
+### The numbers that matter
+
+Production behavior on a 78,797-page brain:
+
+| Metric | Pre-v0.22.5 (master) | v0.22.5 | Δ |
+|---|---|---|---|
+| Autopilot cycle wall time (steady state) | 30+ min (then timeout) | <1 sec | -1800x |
+| Files re-imported per cycle (steady state) | 78,797 | 0 | -78,797 |
+| `autopilot-cycle` jobs hitting `max_stalled` | every cycle | 0 | -100% |
+| Cycle phases that consult per-source anchor | 0 | 1 (sync) | +1 |
+| New regression tests in `test/core/cycle.test.ts` | n/a | 6 | +6 |
+
+Resolver behavior matrix (every row covered by a test):
+
+| Scenario | sourceId passed | Anchor read from | Backward compatible |
+|---|---|---|---|
+| Sources row matches `brainDir` (current install) | `"default"` | `sources.last_commit` ✅ | Yes |
+| No sources row (pre-v0.18 brain) | `undefined` | `config.sync.last_commit` | Yes |
+| `sources` table doesn't exist (very old brain) | `undefined` (catch) | `config.sync.last_commit` | Yes |
+| Multiple rows share a `local_path` (no UNIQUE) | one of the matching ids (non-deterministic) | the matched row's anchor | Yes |
+| Empty-string id row | `""` (defensive ... won't happen in practice) | empty-string source row | Yes |
+
+### What this means for builders
+
+If your brain has been silently doing a full reimport every autopilot cycle, `gbrain upgrade` plus your next cycle will fix it ... no manual action needed. The fix is mechanical and idempotent. If you've been running with the operational band-aid that copied the per-source anchor to the global key every 5 minutes (the pre-PR workaround), you can take it out after upgrading. Two follow-ups are filed for v0.23: a `UNIQUE` index on `sources.local_path` so duplicate-path resolution is deterministic, and narrowing the resolver's bare `catch` to PostgreSQL's `42P01` (undefined_table) so real DB errors don't get silently swallowed into the global-fallback path.
+
+## To take advantage of v0.22.5
+
+`gbrain upgrade` runs `gbrain post-upgrade` which runs `gbrain apply-migrations`. v0.22.5 has no schema migration ... the fix is pure code, no data backfill ... so the upgrade itself is the entire action.
+
+1. **Upgrade:**
+   ```bash
+   gbrain upgrade
+   ```
+
+2. **Verify the next autopilot cycle is fast.** Either let `gbrain autopilot` tick naturally, or run one cycle directly:
+   ```bash
+   gbrain dream --phase sync --json | jq '.phases[] | select(.phase == "sync")'
+   ```
+   On a brain with a registered source, the sync phase should report incremental status (`up_to_date` or a small added/modified count) and complete in seconds. If it reports thousands of files added/modified on a brain you haven't actually changed, file an issue ... the resolver isn't matching your `brainDir` to a `sources.local_path` (likely a path-normalization mismatch ... see TODO 1 below).
+
+3. **Optional ... confirm the resolver matched.** The `sources` row used by `gbrain dream` should match your brain directory exactly:
+   ```bash
+   gbrain query 'SELECT id, local_path FROM sources' --json
+   ```
+   If the path stored in `sources.local_path` differs from the directory `gbrain dream --dir <path>` is invoked with (trailing slash, symlink resolution), v0.22.5 will fall back to the legacy global-key path silently for that source. A future v0.23 fix will normalize both sides; for now you can re-register the source with the canonical absolute path.
+
+4. **If any step fails or the numbers look wrong,** file an issue: https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+   - which step broke
+
+   This feedback loop is how the gbrain maintainers find fragile upgrade paths. Thank you.
+
+### Itemized changes
+
+**Hotfix.** `src/core/cycle.ts` ... new `resolveSourceForDir(engine, brainDir)` helper queries `SELECT id FROM sources WHERE local_path = $1 LIMIT 1`. `runPhaseSync()` calls it before `performSync()` and threads the result as `sourceId`. Bare `try/catch` swallows missing-table errors so pre-v0.18 brains keep working unchanged. 26 new lines, one file. The fix funnels into the existing `readSyncAnchor()` branching at `src/commands/sync.ts:174-188`, which already chose between per-source and global anchors when given a `sourceId`; the cycle just wasn't passing one.
+
+**Tests.** 6 new test cases in `test/core/cycle.test.ts` covering every branch of the resolver:
+- **Test 1** ... seeded `sources` row → `performSync` receives matching `sourceId`.
+- **Test 2** ... no row → `sourceId=undefined`, falls through to global key.
+- **Test 3** ... different `brainDir` than registered source → undefined (no cross-match).
+- **Test 4** ... `sources` table missing (very old brain) → catch returns undefined, sync still runs. Uses a fresh `PGLiteEngine` (not the shared one) because `initSchema()` only re-runs PENDING migrations; `DROP TABLE` on the shared engine would have left it permanently degraded for every subsequent test in the file. Codex review caught this landmine.
+- **Test 5** ... duplicate `local_path` rows → resolver returns one of the matching ids (non-deterministic; the SQL has no `ORDER BY`). Documents the contract for the v0.23 UNIQUE-constraint follow-up.
+- **Test 6** ... empty-string id row → resolver propagates `""` (defensive case Codex flagged ... PK prevents NULL but `''` can be inserted).
+
+The `performSync` mock in `test/core/cycle.test.ts:50-65` was extended to capture `sourceId` alongside the existing `dryRun / noPull / noExtract` opts. The new `describe` block runs after the existing 22 tests; the shared PGLite engine cleanup pattern (`DELETE FROM sources` in `beforeEach`) keeps state from leaking between tests.
+
+### For contributors
+
+When threading new options through `runCycle → runPhaseSync → performSync`, extend the `syncCalls` capture shape in `test/core/cycle.test.ts:20` and add per-option assertions to the existing `describe('runCycle — dryRun propagates...')` and `describe('runCycle — phase selection')` blocks. The `cycle.test.ts` shared-engine pattern is fast (~1.4s for 28 tests on PGLite in-memory) but `initSchema()` only runs PENDING migrations ... if your test needs to mutate the schema mid-suite (DROP TABLE, ALTER, etc.), spin up a fresh `PGLiteEngine` and dispose in `finally` instead of touching the shared engine. The v0.22.5 test 4 is the canonical example.
+
+The bare `catch` in `resolveSourceForDir` is intentional for v0.22.5 because narrowing to a PG-specific error code (`error.code === '42P01'`) requires engine-aware error introspection that the existing PGLite engine doesn't expose uniformly with postgres-engine. v0.23 will add a small `isMissingRelationError(error, engine.kind)` helper to `src/core/utils.ts` and the resolver will rethrow everything else.
+
 ## [0.22.4] - 2026-04-26
 
 ## **Frontmatter-guard ships. Broken brain pages can't hide.**
