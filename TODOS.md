@@ -1,5 +1,46 @@
 # TODOS
 
+## sync (v0.22.10 follow-up — PR #490 review)
+
+### D-PR490-1 — Plumb resolved `database_url` through `SyncOpts`
+**Priority:** P3
+
+**What:** Add `database_url?: string` (or a richer `resolvedConnection` shape) to
+`SyncOpts` and have the caller (`runSync`, the cycle handler, the jobs handler)
+populate it from the active engine instead of having `performSync` /
+`performFullSync` / `import.ts` each call `loadConfig()` separately. Today every
+sync run hits the config file three times.
+
+**Why:** v0.18 multi-source brains can in principle run different sources against
+different `database_url` endpoints (or different per-source overrides via
+`sources.config_jsonb`). Right now `loadConfig()` returns the global config, and
+that always matches the engine in practice — but the convention papers over a
+real divergence the moment someone wants per-source connection settings. Folding
+the resolution into `SyncOpts` makes the worker-engine creation in `sync.ts` and
+`import.ts` deterministic from `SyncOpts` alone.
+
+**Pros:**
+- Removes 3 redundant `loadConfig()` calls per sync.
+- Makes `performSync` / `performFullSync` side-effect-free with respect to the
+  on-disk config file.
+- Sets up for per-source `database_url` overrides without further refactor.
+- Makes the v0.22.10 belt-and-suspenders fallback (PR #490 Q3) cleaner — no
+  more `!config?.database_url` short-circuit inside the parallel branch.
+
+**Cons:**
+- API-shape change to `SyncOpts` (mild; not externally exported).
+- Touching three callers (`runSync`, jobs handler, `cycle.ts` `runPhaseSync`).
+- Only worth doing when paired with a per-source override story; otherwise
+  it's just plumbing.
+
+**Context:** Surfaced during the PR #490 plan-eng-review (parallel sync).
+Deferred because it isn't on the v0.22.10 critical path. The same pattern would
+benefit the cycle handler and the autopilot daemon. See the plan-eng-review
+decisions log: A4 = "Defer; file as TODO."
+
+**Depends on / blocked by:** Nothing structural. Best paired with the v0.18
+per-source `config_jsonb` work if/when that lands.
+
 ## resolver / check-resolvable (v0.22.4 follow-ups)
 
 ### D10 — Extend `check-resolvable` to parse RESOLVER.md disambiguation rules

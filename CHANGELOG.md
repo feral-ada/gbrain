@@ -2,16 +2,75 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.23.0] - 2026-04-28
+## [0.22.10] - 2026-04-28
 
-### Parallel sync — bounded concurrent imports
+**Sync got faster, and the bookmark stopped lying.**
+**Parallel imports, a real writer lock, and a head-drift gate that catches the worst race.**
 
-- `gbrain sync --concurrency N` (alias `--workers N`) parallelizes the import phase using per-worker Postgres engine instances with an atomic queue index (same pattern as `gbrain import --workers N`).
-- **Auto-concurrency:** when a sync touches >100 files and the user didn't set `--concurrency`, defaults to 4 workers. Small incremental syncs stay serial.
-- **Full sync** now passes `--workers N` to `runImport()` — first syncs on large brains (7,000+ pages) go ~4× faster.
-- **Minion sync handler** defaults to concurrency=4, configurable via job params.
-- Delete and rename phases remain serial (order-dependent, fast).
-- PGLite falls back to serial automatically (single-connection engine).
+The headline is `gbrain sync --workers N`: per-worker Postgres engines with an atomic queue index, same pattern as `gbrain import --workers N`. On a 7,000-page brain that used to take 25+ minutes, the import phase now runs across 4 workers by default. The reproducible benchmark in `test/e2e/sync-parallel.test.ts` shows `parallel(4)` finishing 1.3× faster than serial on a 120-file fixture against local Postgres (`serial=289ms parallel(4)=221ms`). The speedup grows on larger brains and slower-roundtrip databases (Supabase, remote PgBouncer) because the worker setup cost amortizes over more files. But the bigger story is that the sync writer is finally exclusive across processes, and the `last_commit` bookmark refuses to advance when git HEAD has drifted out from under us. The silent-skip-then-advance pathology has survived every prior sync hardening pass. It is dead now.
+
+### What you can do now
+
+- `gbrain sync --workers 4` (alias `--concurrency 4`) parallelizes the import phase. Each worker holds 2 connections, so total Postgres connections during the parallel phase is `workers * 2` plus your caller's pool. At the default of 4 workers and a 10-connection caller pool, that's up to 18 connections, well under PgBouncer's `max_client_conn` default of 100 but worth knowing on tight Supabase tiers.
+- **Auto-concurrency:** if you don't pass `--workers`, sync uses 4 workers when the diff exceeds 100 files. Smaller diffs stay serial. Explicit `--workers` always wins (even on a 30-file diff). PGLite forces serial regardless, since it's a single-connection engine.
+- **Full sync** routes through the same path. First syncs on large brains parallelize automatically.
+- **Minion `sync` jobs** also use the new `autoConcurrency()` policy. Behavior is now consistent between CLI sync, the Minion handler, and the autopilot cycle's sync phase. (`noEmbed` defaults to `true` in the jobs handler. Submit `gbrain embed --stale` as a separate job when needed, or rely on the autopilot cycle's embed phase.)
+- **`--workers` validation is loud now.** `--workers 0`, `--workers -3`, `--workers foo`, `--workers 1.5` all exit with an error message. The prior behavior silently fell through to auto-concurrency (4 workers), the opposite of what you typed.
+
+### Correctness fixes you didn't have to ask for
+
+- **Cross-process writer lock.** Two `gbrain sync` calls (manual + autopilot, two terminals, two Conductor workspaces) used to read the same `last_commit`, both write it, and let the last writer win. The new `gbrain-sync` row in `gbrain_cycle_locks` serializes the writer window. Same-process reentrance from the autopilot cycle handler was already covered by the broader `gbrain-cycle` lock; sync's lock is narrower and runs underneath it.
+- **Head-drift gate.** If `git checkout` or `git pull` runs in your worktree mid-sync (Conductor sibling workspace, ad-hoc terminal), the captured `headCommit` no longer matches HEAD when sync finishes. `last_commit` no longer advances in that case. The next sync re-walks the diff against the new HEAD instead of silently moving the bookmark past unimported work.
+- **Vanished files now block bookmark advance.** A file the diff said exists at `headCommit` but is gone from disk used to register as a benign skip. It now goes into `failedFiles` and gates `last_commit` the same way a parse failure does.
+- **Per-source bookmark for Minion `sync` jobs.** The job handler now resolves `sourceId` from the repo path (mirrors the autopilot cycle's `cycle.ts` fix from PR #475). On multi-source brains, this prevents the 30-min full-reimport-every-cycle behavior caused by reading the global `config.sync.last_commit` anchor when the per-source row would have been correct.
+- **Worker connection cleanup.** Worker engines now disconnect inside `try/finally`, even on partial connect failure or mid-import error. The prior `Promise.all(...disconnect)` ran outside any try/finally, so panic-path leaks never released the 8 worker connections.
+- **Engine detection unified.** Both PGLite-detection sites in sync.ts now use `engine.kind === 'pglite'` (the discriminator added in v0.13.1). The `engine.constructor.name === 'PGLiteEngine'` sniff is gone, since it broke under bundling and was inconsistent with the other site's `config.engine` string check.
+
+### What this means for you
+
+If you run autopilot on a 7,000-page Postgres brain, your sync cycle gets faster on day one with no flags. If you have ever felt the bookmark "skip past" work that didn't import, you'll stop seeing it. If you have multiple Conductor workspaces poking the same brain, you'll either wait politely on the writer lock or get a clear "another sync is in progress" error. None of this requires a config change.
+
+## To take advantage of v0.22.10
+
+`gbrain upgrade` should do this automatically. If you want to use the new flags right now:
+
+1. **For a one-off speed win on a large brain:**
+   ```bash
+   gbrain sync --workers 4
+   ```
+   Or for incremental syncs that touch >100 files, just run `gbrain sync`. Auto-concurrency fires.
+
+2. **For your autopilot cycle:** no action. The Minion `sync` handler picks up the new auto-concurrency policy automatically.
+
+3. **Verify the writer lock is working:**
+   ```bash
+   gbrain sync &
+   gbrain sync   # second call will say "Another sync is in progress" or wait
+   ```
+
+4. **If sync ever errors with "Another sync is in progress" and stays stuck:** the lock is in `gbrain_cycle_locks` with id `gbrain-sync` and a 30-minute TTL. If a worker crashed without releasing, the next acquirer takes over once the TTL expires. To unstick faster:
+   ```sql
+   DELETE FROM gbrain_cycle_locks WHERE id = 'gbrain-sync';
+   ```
+
+5. **If anything looks wrong,** file an issue: https://github.com/garrytan/gbrain/issues with output of `gbrain doctor` and the contents of `~/.gbrain/upgrade-errors.jsonl` if it exists.
+
+### Itemized changes
+
+- `src/commands/sync.ts`: `performSync` now wraps body in a `gbrain-sync` DB lock; `--workers` honored regardless of file count when explicit; head-drift gate after import phase; engine.kind detection; try/finally around worker engines; banner moved to stderr.
+- `src/commands/import.ts`: `engine.kind === 'pglite'` discriminator; try/finally around worker engines; shared `parseWorkers()` for `--workers` validation.
+- `src/commands/jobs.ts`: sync handler resolves `sourceId` via `sources.local_path` lookup; concurrency routed through `autoConcurrency()`; `noEmbed: true` default documented.
+- `src/core/sync-concurrency.ts` (new): `autoConcurrency()` + `parseWorkers()` + constants. One source of truth for the concurrency policy that previously lived in three call sites.
+- `src/core/db-lock.ts` (new): generic `tryAcquireDbLock(engine, lockId)` over the existing `gbrain_cycle_locks` table. Reused by performSync. cycle.ts continues to use its own ID `gbrain-cycle` so the two locks nest cleanly.
+- `test/sync-concurrency.test.ts` (new): 17 cases covering autoConcurrency thresholds, shouldRunParallel gates, parseWorkers validation.
+- `test/sync-parallel.test.ts` (new): PGLite-routed coverage of the bookmark gate under concurrency request, the head-drift gate, the writer-lock contract, and PGLite-stays-serial.
+- `test/e2e/sync-parallel.test.ts` (new): DATABASE_URL-gated Postgres E2E. 60-file happy path with `pg_stat_activity` leak probe, plus a 120-file serial-vs-parallel benchmark that prints `SYNC_PARALLEL_BENCH ...` for CHANGELOG quoting.
+
+### For contributors
+
+- `BrainEngine.kind` is now the canonical PGLite/Postgres discriminator. Avoid `engine.constructor.name === '...'` (breaks under bundling) and `config.engine === '...'` (inconsistent with the engine actually in use).
+- The `gbrain_cycle_locks` table is now multi-purpose. The id column distinguishes lock scopes: `gbrain-cycle` for the cycle, `gbrain-sync` for the sync writer. Future locks should pick distinct ids and reuse `tryAcquireDbLock`.
+- `parseWorkers()` is the canonical CLI flag parser for `--workers`. Use it instead of inline `parseInt`.
 
 ## [0.22.6] - 2026-04-28
 
