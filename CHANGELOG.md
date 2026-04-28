@@ -2,6 +2,67 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.22.7] - 2026-04-27
+
+## **Doctor stops timing out on Supabase. Integrity scan finishes in ~6s, multi-source brains get correct counts.**
+
+If you've been hitting the 60-second `gbrain doctor` timeout on Supabase or any pooled-connection deployment, this fixes it. The integrity check used to call `getPage()` 500 times sequentially through PgBouncer transaction-mode pooling. Each call required a full connection acquire/release cycle, which doctor couldn't finish before CI killed it. The new path batch-loads all 500 pages in a single SQL query, finishing in ~6s.
+
+While shipping the perf fix, codex review caught a correctness regression for multi-source brains: the batch SQL was scanning raw `(source_id, slug)` rows while the sequential path scanned unique slugs. Multi-source brains were getting inflated counts. `SELECT DISTINCT ON (slug)` mirrors the sequential path's `Set<string>` semantics; parity tests against real Postgres pin both paths to the same output.
+
+Plus a Linux CI fix: `gbrain skillpack` lockfile checks were intermittently failing on ext4's sub-millisecond `mtimeMs` timestamps when `Date.now()` returned an integer ms behind the file's recorded mtime. Lock age now clamps to zero.
+
+### The numbers that matter
+
+Measured against the real failure mode on a Supabase PgBouncer deployment that hit the 60s CI timeout pre-fix.
+
+| Behavior | Before v0.22.7 | After v0.22.7 |
+|---|---|---|
+| `gbrain doctor` wall-clock (Postgres + PgBouncer) | 60s+ timeout (killed) | ~6s |
+| `integrity_sample` query round-trips | ~500 (sequential `getPage`) | 1 (`SELECT DISTINCT ON`) |
+| Multi-source brain scan accuracy | Overcounted by `source_id` | Exact per unique slug |
+
+### What this means for Supabase deployments
+
+If you've been avoiding `gbrain doctor` because it timed out, run it again. If you maintain a multi-source brain (imported pages from another gbrain deployment under a non-default `source_id`), the scan now treats each slug once instead of once-per-source — your output is exact, not inflated. Single-source users see no behavior change; PGLite users were never affected (the batch path is Postgres-only).
+
+## To take advantage of v0.22.7
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about anything afterwards:
+
+1. **Run the upgrade:**
+   ```bash
+   gbrain upgrade
+   ```
+2. **Verify doctor finishes cleanly (especially relevant if you hit timeouts before):**
+   ```bash
+   gbrain doctor
+   ```
+   On Postgres + PgBouncer deployments, you should see `integrity_sample` finish in ~6s instead of timing out at 60s.
+3. **If `doctor` still times out or output looks wrong,** please file an issue:
+   https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor` (full)
+   - which engine (Postgres vs PGLite)
+   - whether you use multi-source brains
+
+### Itemized changes
+
+#### Performance
+- `gbrain doctor` integrity sample now batch-loads via a single SQL query on Postgres deployments (60s+ timeout → ~6s wall-clock, 500 round-trips → 1).
+- Batch path explicitly gated to Postgres via `engine.kind` so PGLite never attempts it (clean fallback signal).
+
+#### Correctness
+- `scanIntegrity` batch path uses `SELECT DISTINCT ON (slug)` to scope by unique slug, matching `engine.getAllSlugs()`'s `Set<string>` semantics. Multi-source brains (UNIQUE(source_id, slug) since v0.18.0) now get correct counts instead of one-scan-per-source-row.
+- `IntegrityScanResult.pagesScanned` now reflects unique slugs scanned, not raw row count. Single-source brains: unchanged. Multi-source brains: counts now match expected distinct-page semantics.
+- Batch-path fallback narrowed: real Postgres errors (deadlock, connection drop, SQL bug) surface via `GBRAIN_DEBUG=1` instead of being silently swallowed.
+
+#### Tests
+- New `test/e2e/integrity-batch.test.ts` — four parity cases (dedup, hits, validate, topPages) asserting batch ≡ sequential against real Postgres. Pinning the multi-source dedup case requires a raw-SQL fixture for the alt-source row since `engine.putPage` doesn't take a `source_id`.
+
+#### Infrastructure
+- `src/core/skillpack/installer.ts` — clamp negative lock-age to 0, fixing intermittent Linux ext4 CI flakes from sub-millisecond `mtimeMs` precision (Date.now is integer ms; mtime can be ~0.3ms ahead). New regression test in `test/skillpack-install.test.ts` deterministically reproduces via `utimesSync`.
+- `CLAUDE.md` test inventory updated for the new test files.
+
 ## [0.22.6] - 2026-04-28
 
 ### Schema verification after migrations
