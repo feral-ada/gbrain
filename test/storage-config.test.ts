@@ -74,6 +74,27 @@ describe('Storage Configuration', () => {
       expect(isGitTracked('peoplex/test', testConfig)).toBe(false);
       expect(isSupabaseOnly('mediax/test', testConfig)).toBe(false);
     });
+
+    test('regression — media/xerox does NOT match media/x (path-segment matcher)', () => {
+      // Without path-segment matching, slug.startsWith('media/x') would falsely
+      // match 'media/xerox/foo'. The new matcher requires trailing '/'; if the
+      // user's config has 'media/x' (no slash), the matcher refuses to match —
+      // the validator's auto-normalize (step 7) ensures canonical input.
+      const collisionConfig: StorageConfig = {
+        db_tracked: [],
+        db_only: ['media/x/'], // canonical, with trailing slash
+      };
+      expect(isSupabaseOnly('media/xerox/something', collisionConfig)).toBe(false);
+      expect(isSupabaseOnly('media/x/tweet-1', collisionConfig)).toBe(true);
+
+      // Non-canonical input (no trailing slash) is refused by the matcher.
+      const noSlashConfig: StorageConfig = {
+        db_tracked: [],
+        db_only: ['media/x'],
+      };
+      expect(isSupabaseOnly('media/xerox/foo', noSlashConfig)).toBe(false);
+      expect(isSupabaseOnly('media/x/tweet-1', noSlashConfig)).toBe(false);
+    });
   });
 });
 

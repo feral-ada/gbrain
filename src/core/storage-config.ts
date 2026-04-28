@@ -263,12 +263,31 @@ export function validateStorageConfig(config: StorageConfig): string[] {
   return warnings;
 }
 
+/**
+ * Path-segment match: a slug belongs to a tier directory iff the directory
+ * is a complete path-segment ancestor of the slug. `media/x/` matches
+ * `media/x/foo` but NOT `media/xerox/foo` — eliminates the prefix-collision
+ * class of bug (Issue #5 of the eng review, D6 lock).
+ *
+ * Strict: requires the configured directory to end with `/`. The validator
+ * (per D7+D8) auto-normalizes input so the matcher only ever sees canonical
+ * trailing-`/` directories.
+ */
+function matchesTierDir(slug: string, dir: string): boolean {
+  if (!dir.endsWith('/')) return false; // not normalized — matcher refuses
+  // slug must equal dir's bare prefix OR start with the trailing-slash form.
+  // Example: dir = 'media/x/' matches 'media/x/anything' but not 'media/x'
+  // or 'media/xerox'. (A slug that exactly equals 'media/x' is a directory-
+  // level entry the brain doesn't write.)
+  return slug.startsWith(dir);
+}
+
 export function isDbTracked(slug: string, config: StorageConfig): boolean {
-  return config.db_tracked.some((dir) => slug.startsWith(dir));
+  return config.db_tracked.some((dir) => matchesTierDir(slug, dir));
 }
 
 export function isDbOnly(slug: string, config: StorageConfig): boolean {
-  return config.db_only.some((dir) => slug.startsWith(dir));
+  return config.db_only.some((dir) => matchesTierDir(slug, dir));
 }
 
 export function getStorageTier(slug: string, config: StorageConfig): StorageTier {
