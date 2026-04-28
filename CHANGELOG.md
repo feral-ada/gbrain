@@ -2,7 +2,7 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.22.7] - 2026-04-27
+## [0.22.8] - 2026-04-27
 
 ## **Doctor stops timing out on Supabase. Integrity scan finishes in ~6s, multi-source brains get correct counts.**
 
@@ -16,7 +16,7 @@ Plus a Linux CI fix: `gbrain skillpack` lockfile checks were intermittently fail
 
 Measured against the real failure mode on a Supabase PgBouncer deployment that hit the 60s CI timeout pre-fix.
 
-| Behavior | Before v0.22.7 | After v0.22.7 |
+| Behavior | Before v0.22.8 | After v0.22.8 |
 |---|---|---|
 | `gbrain doctor` wall-clock (Postgres + PgBouncer) | 60s+ timeout (killed) | ~6s |
 | `integrity_sample` query round-trips | ~500 (sequential `getPage`) | 1 (`SELECT DISTINCT ON`) |
@@ -26,7 +26,7 @@ Measured against the real failure mode on a Supabase PgBouncer deployment that h
 
 If you've been avoiding `gbrain doctor` because it timed out, run it again. If you maintain a multi-source brain (imported pages from another gbrain deployment under a non-default `source_id`), the scan now treats each slug once instead of once-per-source — your output is exact, not inflated. Single-source users see no behavior change; PGLite users were never affected (the batch path is Postgres-only).
 
-## To take advantage of v0.22.7
+## To take advantage of v0.22.8
 
 `gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about anything afterwards:
 
