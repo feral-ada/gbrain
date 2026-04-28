@@ -1,8 +1,8 @@
-import { existsSync, statSync } from 'fs';
 import { join } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
 import { loadStorageConfig, validateStorageConfig, getStorageTier } from '../core/storage-config.ts';
 import type { StorageConfig, StorageTier } from '../core/storage-config.ts';
+import { walkBrainRepo, type DiskFileEntry } from '../core/disk-walk.ts';
 
 interface StorageStatusResult {
   config: StorageConfig | null;
@@ -135,26 +135,22 @@ async function getStorageStatus(engine: BrainEngine, repoPath: string | null): P
   const diskUsageByTier: Record<StorageTier, number> = { db_tracked: 0, db_only: 0, unspecified: 0 };
   const missingFiles: Array<{ slug: string; expectedPath: string }> = [];
 
-  // Storage status needs the global view (to compute "unspecified" pages
-  // that don't match any tier prefix). A single full scan is unavoidable
-  // here. The slugPrefix filter (Issue #13) optimizes per-tier consumers
-  // like `gbrain export --restore-only`. Step 5 reduces per-page disk
-  // syscall cost via a single recursive readdirSync.
+  // Single recursive walk of the brain repo (Issue #14). Replaces per-page
+  // existsSync+statSync — was ~400K syscalls on 200K-page brains, now ~one
+  // per directory + one stat per .md file, plus O(1) lookups below.
+  const fileMap: Map<string, DiskFileEntry> = repoPath ? walkBrainRepo(repoPath) : new Map();
+
   const pages = await engine.listPages({ limit: 1_000_000 });
 
   for (const page of pages) {
     const tier = config ? getStorageTier(page.slug, config) : 'unspecified';
     pagesByTier[tier]++;
     if (!repoPath) continue;
-    const filePath = join(repoPath, page.slug + '.md');
-    if (existsSync(filePath)) {
-      try {
-        diskUsageByTier[tier] += statSync(filePath).size;
-      } catch {
-        // ignore stat errors
-      }
+    const entry = fileMap.get(page.slug);
+    if (entry) {
+      diskUsageByTier[tier] += entry.size;
     } else if (config && tier === 'db_only') {
-      missingFiles.push({ slug: page.slug, expectedPath: filePath });
+      missingFiles.push({ slug: page.slug, expectedPath: join(repoPath, page.slug + '.md') });
     }
   }
 
