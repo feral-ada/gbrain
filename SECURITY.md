@@ -2,10 +2,9 @@
 
 ## Reporting Vulnerabilities
 
-If you discover a security issue in GBrain, please report it privately:
-
-- **Email:** security@garrytan.com
-- **GitHub:** Open a [private security advisory](https://github.com/garrytan/gbrain/security/advisories/new)
+If you discover a security issue in GBrain, please report it privately by opening
+a [private security advisory](https://github.com/garrytan/gbrain/security/advisories/new)
+on GitHub.
 
 Do not open a public issue for security vulnerabilities.
 
