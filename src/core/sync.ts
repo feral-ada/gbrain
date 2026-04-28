@@ -307,11 +307,47 @@ import { createHash as _createHash } from 'crypto';
 export interface SyncFailure {
   path: string;
   error: string;
+  /** Structured error code extracted from the error message. */
+  code?: string;
   commit: string;
   line?: number;
   ts: string;
   acknowledged?: boolean;
   acknowledged_at?: string;
+}
+
+/**
+ * Best-effort extraction of a structured error code from a sync failure
+ * message. Matches known ParseValidationCode patterns (SLUG_MISMATCH,
+ * YAML_PARSE, etc.) and common DB / timeout errors. Returns 'UNKNOWN'
+ * when no pattern matches.
+ */
+export function classifyErrorCode(errorMsg: string): string {
+  if (/slug.*does not match|SLUG_MISMATCH/i.test(errorMsg)) return 'SLUG_MISMATCH';
+  if (/YAML parse|yaml.*parse|YAML_PARSE/i.test(errorMsg)) return 'YAML_PARSE';
+  if (/MISSING_OPEN|missing.*open/i.test(errorMsg)) return 'MISSING_OPEN';
+  if (/MISSING_CLOSE|missing.*close/i.test(errorMsg)) return 'MISSING_CLOSE';
+  if (/NULL_BYTES|null.*byte/i.test(errorMsg)) return 'NULL_BYTES';
+  if (/NESTED_QUOTES|nested.*quote/i.test(errorMsg)) return 'NESTED_QUOTES';
+  if (/EMPTY_FRONTMATTER|empty.*frontmatter/i.test(errorMsg)) return 'EMPTY_FRONTMATTER';
+  if (/duplicate.*key/i.test(errorMsg)) return 'YAML_DUPLICATE_KEY';
+  if (/statement.*timeout/i.test(errorMsg)) return 'STATEMENT_TIMEOUT';
+  if (/invalid.*utf/i.test(errorMsg)) return 'INVALID_UTF8';
+  return 'UNKNOWN';
+}
+
+/** Group failures by error code and return a sorted summary. */
+export function summarizeFailuresByCode(
+  failures: Array<{ error: string; code?: string }>,
+): Array<{ code: string; count: number }> {
+  const counts: Record<string, number> = {};
+  for (const f of failures) {
+    const code = f.code ?? classifyErrorCode(f.error);
+    counts[code] = (counts[code] ?? 0) + 1;
+  }
+  return Object.entries(counts)
+    .sort(([, a], [, b]) => b - a)
+    .map(([code, count]) => ({ code, count }));
 }
 
 function _failuresDir(): string {
@@ -370,6 +406,7 @@ export function recordSyncFailures(
     const entry: SyncFailure = {
       path: f.path,
       error: f.error,
+      code: classifyErrorCode(f.error),
       commit,
       line: f.line,
       ts: now,
@@ -380,28 +417,42 @@ export function recordSyncFailures(
   }
 }
 
+export interface AcknowledgeResult {
+  count: number;
+  summary: Array<{ code: string; count: number }>;
+}
+
 /**
  * Mark all unacknowledged failures as acknowledged. Used by
- * `gbrain sync --skip-failed`. Returns the number newly acknowledged.
+ * `gbrain sync --skip-failed`. Returns count and a structured summary
+ * grouped by error code so the operator can see *why* files were skipped.
  *
  * We do not delete — acknowledged entries stay as historical record so
  * doctor can still show them under a "previously skipped" bucket.
  */
-export function acknowledgeSyncFailures(): number {
+export function acknowledgeSyncFailures(): AcknowledgeResult {
   const entries = loadSyncFailures();
-  if (entries.length === 0) return 0;
+  if (entries.length === 0) return { count: 0, summary: [] };
   const now = new Date().toISOString();
   let changed = 0;
+  const newlyAcked: SyncFailure[] = [];
   const updated = entries.map(e => {
     if (e.acknowledged) return e;
     changed++;
-    return { ...e, acknowledged: true, acknowledged_at: now };
+    // Backfill code for entries that predate the code field.
+    const code = e.code ?? classifyErrorCode(e.error);
+    const acked = { ...e, code, acknowledged: true, acknowledged_at: now };
+    newlyAcked.push(acked);
+    return acked;
   });
-  if (changed === 0) return 0;
+  if (changed === 0) return { count: 0, summary: [] };
   _mkdirSync(_failuresDir(), { recursive: true });
   const fd = require('fs').writeFileSync;
   fd(syncFailuresPath(), updated.map(e => JSON.stringify(e)).join('\n') + '\n');
-  return changed;
+  return {
+    count: changed,
+    summary: summarizeFailuresByCode(newlyAcked),
+  };
 }
 
 /** Return only unacknowledged failures. */

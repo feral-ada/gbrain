@@ -12,6 +12,7 @@ import {
   recordSyncFailures,
   unacknowledgedSyncFailures,
   acknowledgeSyncFailures,
+  summarizeFailuresByCode,
 } from '../core/sync.ts';
 import { estimateTokens, CHUNKER_VERSION } from '../core/chunkers/code.ts';
 import { EMBEDDING_MODEL, estimateEmbeddingCostUsd } from '../core/embedding.ts';
@@ -522,9 +523,14 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
   // current set, --retry-failed re-parses before running the normal sync.
   if (failedFiles.length > 0) {
     recordSyncFailures(failedFiles, headCommit);
+    // Emit structured summary grouped by error code so the operator
+    // can see *why* files failed, not just how many.
+    const codeSummary = summarizeFailuresByCode(failedFiles);
+    const codeBreakdown = codeSummary.map(s => `  ${s.code}: ${s.count}`).join('\n');
     if (!opts.skipFailed) {
       console.error(
-        `\nSync blocked: ${failedFiles.length} file(s) failed to parse. ` +
+        `\nSync blocked: ${failedFiles.length} file(s) failed to parse:\n` +
+        `${codeBreakdown}\n\n` +
         `Fix the YAML frontmatter in the files above and re-run, or use ` +
         `'gbrain sync --skip-failed' to acknowledge and move on.`,
       );
@@ -547,8 +553,12 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
     }
     // --skip-failed: acknowledge the now-recorded set and proceed.
     const acked = acknowledgeSyncFailures();
-    if (acked > 0) {
-      console.error(`  Acknowledged ${acked} failure(s) and advancing past them.`);
+    if (acked.count > 0) {
+      const ackedBreakdown = acked.summary.map(s => `  ${s.code}: ${s.count}`).join('\n');
+      console.error(
+        `  Acknowledged ${acked.count} failure(s) and advancing past them:\n` +
+        `${ackedBreakdown}`,
+      );
     }
   }
 
@@ -656,9 +666,12 @@ async function performFullSync(
   // the sync module owns the last_commit write. Respect the same gate.
   if (result.failures.length > 0) {
     recordSyncFailures(result.failures, headCommit);
+    const codeSummary = summarizeFailuresByCode(result.failures);
+    const codeBreakdown = codeSummary.map(s => `  ${s.code}: ${s.count}`).join('\n');
     if (!opts.skipFailed) {
       console.error(
-        `\nFull sync blocked: ${result.failures.length} file(s) failed. ` +
+        `\nFull sync blocked: ${result.failures.length} file(s) failed:\n` +
+        `${codeBreakdown}\n\n` +
         `Fix the YAML in those files and re-run, or use '--skip-failed'.`,
       );
       await engine.setConfig('sync.last_run', new Date().toISOString());
@@ -675,7 +688,13 @@ async function performFullSync(
       };
     }
     const acked = acknowledgeSyncFailures();
-    if (acked > 0) console.error(`  Acknowledged ${acked} failure(s) and advancing past them.`);
+    if (acked.count > 0) {
+      const ackedBreakdown = acked.summary.map(s => `  ${s.code}: ${s.count}`).join('\n');
+      console.error(
+        `  Acknowledged ${acked.count} failure(s) and advancing past them:\n` +
+        `${ackedBreakdown}`,
+      );
+    }
   }
 
   // Persist sync state so next sync is incremental (C1 fix: was missing).

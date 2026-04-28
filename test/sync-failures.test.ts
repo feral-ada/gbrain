@@ -76,18 +76,19 @@ describe('Bug 9 — sync-failures JSONL helpers', () => {
       { path: 'b.md', error: 'err2' },
     ], 'commit1');
 
-    const n = acknowledgeSyncFailures();
-    expect(n).toBe(2);
+    const result = acknowledgeSyncFailures();
+    expect(result.count).toBe(2);
+    expect(result.summary.length).toBeGreaterThan(0);
     const after = loadSyncFailures();
     expect(after.every(e => e.acknowledged === true)).toBe(true);
     expect(after.every(e => typeof e.acknowledged_at === 'string')).toBe(true);
 
     // Second ack: nothing new to mark.
-    expect(acknowledgeSyncFailures()).toBe(0);
+    expect(acknowledgeSyncFailures().count).toBe(0);
 
     // Adding a fresh failure then ack: only the new one flips.
     recordSyncFailures([{ path: 'c.md', error: 'err3' }], 'commit2');
-    expect(acknowledgeSyncFailures()).toBe(1);
+    expect(acknowledgeSyncFailures().count).toBe(1);
     expect(loadSyncFailures().length).toBe(3);
     expect(loadSyncFailures().every(e => e.acknowledged === true)).toBe(true);
   });
@@ -156,5 +157,109 @@ describe('Bug 9 — sync.ts CLI flag wiring', () => {
     expect(source).toContain('RunImportResult');
     expect(source).toContain('failures: Array<{ path: string; error: string }>');
     expect(source).toContain('recordSyncFailures');
+  });
+});
+
+describe('classifyErrorCode — error message to code mapping', () => {
+  test('classifies SLUG_MISMATCH from error message', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode(
+      'Frontmatter slug "my-friend-mike" does not match path-derived slug "2008-03-20-my-friend-mike"'
+    )).toBe('SLUG_MISMATCH');
+  });
+
+  test('classifies YAML_PARSE from error message', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('YAML parse failed: unexpected colon in title')).toBe('YAML_PARSE');
+  });
+
+  test('classifies YAML_DUPLICATE_KEY', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('YAMLException: duplicated mapping key')).toBe('YAML_DUPLICATE_KEY');
+  });
+
+  test('classifies STATEMENT_TIMEOUT', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('canceling statement due to statement timeout')).toBe('STATEMENT_TIMEOUT');
+  });
+
+  test('classifies NULL_BYTES', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('invalid UTF-8: null byte at position 3770')).toBe('NULL_BYTES');
+  });
+
+  test('classifies INVALID_UTF8', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('invalid UTF-8 sequence at position 500')).toBe('INVALID_UTF8');
+  });
+
+  test('returns UNKNOWN for unrecognized errors', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('something completely different')).toBe('UNKNOWN');
+  });
+});
+
+describe('summarizeFailuresByCode — grouped summary', () => {
+  test('groups failures by classified code', async () => {
+    const { summarizeFailuresByCode } = await import('../src/core/sync.ts');
+    const summary = summarizeFailuresByCode([
+      { error: 'Frontmatter slug "a" does not match path-derived slug "b"' },
+      { error: 'Frontmatter slug "c" does not match path-derived slug "d"' },
+      { error: 'YAML parse failed: bad colon' },
+      { error: 'something unknown' },
+    ]);
+    expect(summary).toEqual([
+      { code: 'SLUG_MISMATCH', count: 2 },
+      { code: 'YAML_PARSE', count: 1 },
+      { code: 'UNKNOWN', count: 1 },
+    ]);
+  });
+
+  test('respects pre-classified code field', async () => {
+    const { summarizeFailuresByCode } = await import('../src/core/sync.ts');
+    const summary = summarizeFailuresByCode([
+      { error: 'anything', code: 'SLUG_MISMATCH' },
+      { error: 'anything', code: 'SLUG_MISMATCH' },
+      { error: 'anything', code: 'YAML_PARSE' },
+    ]);
+    expect(summary).toEqual([
+      { code: 'SLUG_MISMATCH', count: 2 },
+      { code: 'YAML_PARSE', count: 1 },
+    ]);
+  });
+
+  test('returns empty array for no failures', async () => {
+    const { summarizeFailuresByCode } = await import('../src/core/sync.ts');
+    expect(summarizeFailuresByCode([])).toEqual([]);
+  });
+});
+
+describe('acknowledgeSyncFailures — structured return', () => {
+  test('returns count and code summary', async () => {
+    const { recordSyncFailures, acknowledgeSyncFailures } = await import('../src/core/sync.ts');
+    recordSyncFailures([
+      { path: 'a.md', error: 'Frontmatter slug "x" does not match path-derived slug "y"' },
+      { path: 'b.md', error: 'Frontmatter slug "p" does not match path-derived slug "q"' },
+      { path: 'c.md', error: 'YAML parse failed: bad' },
+    ], 'commit1');
+
+    const result = acknowledgeSyncFailures();
+    expect(result.count).toBe(3);
+    expect(result.summary).toEqual([
+      { code: 'SLUG_MISMATCH', count: 2 },
+      { code: 'YAML_PARSE', count: 1 },
+    ]);
+  });
+});
+
+describe('recordSyncFailures — code field', () => {
+  test('records classified code alongside error message', async () => {
+    const { recordSyncFailures, loadSyncFailures } = await import('../src/core/sync.ts');
+    recordSyncFailures([
+      { path: 'a.md', error: 'Frontmatter slug "x" does not match path-derived slug "y"' },
+    ], 'commit1');
+
+    const entries = loadSyncFailures();
+    expect(entries[0].code).toBe('SLUG_MISMATCH');
   });
 });
