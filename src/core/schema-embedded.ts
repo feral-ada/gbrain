@@ -597,7 +597,7 @@ CREATE TABLE IF NOT EXISTS subagent_rate_leases (
 CREATE INDEX IF NOT EXISTS idx_rate_leases_key_expires ON subagent_rate_leases (key, expires_at);
 
 -- ============================================================
--- Dream-cycle significance verdict cache — v0.27 synthesize phase
+-- Dream-cycle significance verdict cache — v0.23 synthesize phase
 -- ============================================================
 -- Caches the cheap Haiku "is this transcript worth processing?" verdict
 -- per (file_path, content_hash) so backfill re-runs skip already-judged

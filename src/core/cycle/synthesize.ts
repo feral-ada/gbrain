@@ -1,5 +1,5 @@
 /**
- * Synthesize phase (v0.27) — conversation-to-brain pipeline.
+ * Synthesize phase (v0.23) — conversation-to-brain pipeline.
  *
  * Reads transcripts from the configured corpus dir, runs a cheap Haiku
  * "is this worth processing?" verdict (cached in `dream_verdicts`), then

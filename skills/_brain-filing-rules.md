@@ -113,7 +113,7 @@ gbrain files restore <dir>                # Download back to local
 This ensures any derived brain page can be traced back to its original source,
 and large files don't bloat the git repo.
 
-## Dream-cycle synthesize / patterns directories (v0.27)
+## Dream-cycle synthesize / patterns directories (v0.23)
 
 The `synthesize` and `patterns` phases of `gbrain dream` write to a
 **fixed allow-list** of paths sourced from `_brain-filing-rules.json`'s

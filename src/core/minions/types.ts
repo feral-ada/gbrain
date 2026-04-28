@@ -403,7 +403,7 @@ export interface SubagentHandlerData {
   /** Template variables for subagent_def. Arbitrary JSON-serializable. */
   input_vars?: Record<string, unknown>;
   /**
-   * Trusted-workspace allow-list for put_page (v0.27 dream cycle).
+   * Trusted-workspace allow-list for put_page (v0.23 dream cycle).
    *
    * When set, the subagent's put_page calls are bounded to slugs matching
    * any of these prefix globs (e.g. ["wiki/personal/reflections/*",

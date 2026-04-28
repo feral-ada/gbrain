@@ -1,7 +1,7 @@
 /**
  * E2E full 8-phase cycle on PGLite, no API key required.
  *
- * Verifies that the v0.27 phase order — lint → backlinks → sync →
+ * Verifies that the v0.23 phase order — lint → backlinks → sync →
  * synthesize → extract → patterns → embed → orphans — is honored
  * end-to-end through runCycle when no API key is present (synthesize
  * + patterns skip cleanly, the other six phases run unchanged).
@@ -9,7 +9,7 @@
  * Two regression-relevant invariants:
  *   1. CycleReport.phases preserves the 8-phase order — no future
  *      reorder regresses without breaking this test.
- *   2. CycleReport.totals carries the new v0.27 fields:
+ *   2. CycleReport.totals carries the new v0.23 fields:
  *      transcripts_processed, synth_pages_written, patterns_written.
  *
  * No DATABASE_URL required. Mocks embedBatch so the embed phase doesn't
@@ -80,7 +80,7 @@ async function withoutAnthropicKey<T>(body: () => Promise<T>): Promise<T> {
   }
 }
 
-describe('E2E v0.27 8-phase cycle', () => {
+describe('E2E v0.23 8-phase cycle', () => {
   test('ALL_PHASES is the 8-phase order in the documented sequence', () => {
     expect(ALL_PHASES).toEqual([
       'lint',
@@ -94,7 +94,7 @@ describe('E2E v0.27 8-phase cycle', () => {
     ]);
   });
 
-  test('full cycle on dry-run returns CycleReport.phases in v0.27 order with new totals fields', async () => {
+  test('full cycle on dry-run returns CycleReport.phases in v0.23 order with new totals fields', async () => {
     const rig = await setupRig();
     try {
       await withoutAnthropicKey(async () => {
@@ -114,7 +114,7 @@ describe('E2E v0.27 8-phase cycle', () => {
           'embed',
           'orphans',
         ]);
-        // New totals fields exist (v0.27 additive growth)
+        // New totals fields exist (v0.23 additive growth)
         expect(report.totals).toMatchObject({
           transcripts_processed: 0,
           synth_pages_written: 0,

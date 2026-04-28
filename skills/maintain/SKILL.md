@@ -85,7 +85,7 @@ If timeline_entry_count is 0, extract structured timeline from markdown:
 gbrain extract timeline --dir ~/brain
 ```
 
-### Dream cycle (v0.27): synthesize + patterns
+### Dream cycle (v0.23): synthesize + patterns
 
 `gbrain dream` runs the full 8-phase maintenance cycle:
 

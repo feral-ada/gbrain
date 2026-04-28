@@ -129,7 +129,7 @@ export function validatePageSlug(slug: string): void {
  * permissive — depth is unbounded, so `wiki/originals/*` matches both
  * `wiki/originals/idea-x` and `wiki/originals/ideas/2026-04-25-idea-y`.
  *
- * Used by the v0.27 dream-cycle trusted-workspace path. Order doesn't
+ * Used by the v0.23 dream-cycle trusted-workspace path. Order doesn't
  * matter; the first match wins (returns true on any match).
  */
 export function matchesSlugAllowList(slug: string, prefixes: readonly string[]): boolean {
@@ -207,7 +207,7 @@ export interface OperationContext {
   subagentId?: number;
   viaSubagent?: boolean;
   /**
-   * Trusted-workspace allow-list (v0.27 dream cycle). When the cycle's
+   * Trusted-workspace allow-list (v0.23 dream cycle). When the cycle's
    * synthesize/patterns phases dispatch a subagent, they thread an
    * explicit list of slug-prefix globs (e.g. "wiki/personal/reflections/*")
    * through this field. put_page enforces it BEFORE the legacy
@@ -350,7 +350,7 @@ const put_page: Operation = {
       | { skipped: 'remote' }
       | undefined;
     let autoTimeline: { created: number } | { error: string } | { skipped: 'remote' } | undefined;
-    // Trusted-workspace path (v0.27 dream cycle) re-enables auto-link/timeline
+    // Trusted-workspace path (v0.23 dream cycle) re-enables auto-link/timeline
     // even though ctx.remote=true, because the allow-list bounds the slug and
     // the synthesis prompt is itself the trusted dispatcher. Without this,
     // the cycle's `extract` phase would have to recompute every edge, and

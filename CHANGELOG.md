@@ -2,7 +2,7 @@
 
 All notable changes to GBrain will be documented in this file.
 
-## [0.27.0] - 2026-04-26
+## [0.23.0] - 2026-04-26
 
 **`gbrain dream` now actually dreams. Conversation transcripts become reflections, originals, and 25-year patterns ... overnight.**
 
@@ -14,7 +14,7 @@ The motivating story: on 2026-04-25 you read your Stanford-era email archive (4,
 
 Real production deployment, default config (Sonnet 4.6 synthesis, Haiku 4.5 verdict, 12-hour cooldown). Reproduce with `gbrain dream --phase synthesize --input <fixture>` against any transcript >2000 chars.
 
-| Metric | Before (v0.20.4) | After (v0.27.0) | Δ |
+| Metric | Before (v0.20.4) | After (v0.23.0) | Δ |
 |---|---|---|---|
 | Cycle phases | 6 | 8 | +33% |
 | Sources of brain enrichment | 4 (manual, signal, ingest, extract) | 5 (+ overnight synth) | +1 lane |
@@ -27,7 +27,7 @@ The lane that matters: a daily conversation between you and the agent now lands 
 
 Configure `dream.synthesize.session_corpus_dir` once, set `dream.synthesize.enabled true`, and `gbrain dream` (or your existing autopilot install) consolidates yesterday's conversations every overnight pass. Edited transcripts produce new slugs (content-hash suffix) ... never silently overwrite. The synthesize subagent is bounded to an explicit allow-list sourced from `_brain-filing-rules.json`, so even a poisoned transcript can't write to `wiki/finance/secret.md`. `--dry-run` runs the cheap Haiku verdict (cached in `dream_verdicts`) so you can preview without spending real Sonnet tokens.
 
-## To take advantage of v0.27.0
+## To take advantage of v0.23.0
 
 `gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
 

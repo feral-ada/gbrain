@@ -1,5 +1,5 @@
 /**
- * Transcript discovery for the v0.27 dream-cycle synthesize phase.
+ * Transcript discovery for the v0.23 dream-cycle synthesize phase.
  *
  * Walks a corpus directory for `.txt` files, applies date-range filters,
  * size filters (min_chars), and word-boundary regex exclude patterns.

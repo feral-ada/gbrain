@@ -1173,7 +1173,7 @@ export class PostgresEngine implements BrainEngine {
     return rows as unknown as RawData[];
   }
 
-  // Dream-cycle significance verdict cache (v0.27).
+  // Dream-cycle significance verdict cache (v0.23).
   async getDreamVerdict(filePath: string, contentHash: string): Promise<DreamVerdict | null> {
     const sql = this.sql;
     const rows = await sql<Array<{

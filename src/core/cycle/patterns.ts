@@ -1,5 +1,5 @@
 /**
- * Patterns phase (v0.27) — cross-session theme detection.
+ * Patterns phase (v0.23) — cross-session theme detection.
  *
  * Reads recent reflections (within `lookback_days`), runs a single Sonnet
  * subagent to surface themes that recur across ≥`min_evidence` distinct

@@ -95,7 +95,7 @@ function paramsToInputSchema(op: Operation): Record<string, unknown> {
  *
  *  - Default (legacy): slug MUST start with `wiki/agents/<subagentId>/`,
  *    enforced by both the JSONSchema `pattern` and the server-side check.
- *  - Trusted-workspace (v0.27 dream cycle): when `allowedSlugPrefixes` is
+ *  - Trusted-workspace (v0.23 dream cycle): when `allowedSlugPrefixes` is
  *    set, the model is told the allowed prefixes in plain English (no
  *    regex pattern — the prefix list is authoritative server-side, and
  *    JSONSchema can't express "matches any of these globs" cleanly).
@@ -134,7 +134,7 @@ export interface BuildBrainToolsOpts {
   /** Optional filter: only include names in this set. */
   allowedNames?: ReadonlySet<string>;
   /**
-   * Trusted-workspace allow-list (v0.27). When set, put_page is bounded
+   * Trusted-workspace allow-list (v0.23). When set, put_page is bounded
    * to slugs matching these prefix globs instead of the legacy
    * `wiki/agents/<id>/...` namespace. Trust comes from PROTECTED_JOB_NAMES
    * (MCP can't submit subagent jobs) — this flows from

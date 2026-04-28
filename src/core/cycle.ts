@@ -16,10 +16,10 @@
  *   │ Phase 1: lint --fix         (filesystem writes, no DB)    │
  *   │ Phase 2: backlinks --fix    (filesystem writes, no DB)    │
  *   │ Phase 3: sync               (DB picks up phases 1+2)      │
- *   │ Phase 4: synthesize         (v0.27: transcripts → pages)  │
+ *   │ Phase 4: synthesize         (v0.23: transcripts → pages)  │
  *   │ Phase 5: extract            (DB picks up links from sync  │
  *   │                              + synthesize)                │
- *   │ Phase 6: patterns           (v0.27: cross-session themes; │
+ *   │ Phase 6: patterns           (v0.23: cross-session themes; │
  *   │                              MUST be after extract so     │
  *   │                              graph state is fresh)        │
  *   │ Phase 7: embed --stale      (DB writes)                   │
@@ -131,11 +131,11 @@ export interface CycleReport {
     pages_extracted: number;
     pages_embedded: number;
     orphans_found: number;
-    /** v0.27: number of transcripts the synthesize phase processed (judged + dispatched). */
+    /** v0.23: number of transcripts the synthesize phase processed (judged + dispatched). */
     transcripts_processed: number;
-    /** v0.27: number of new reflection/original/people pages written by synthesize. */
+    /** v0.23: number of new reflection/original/people pages written by synthesize. */
     synth_pages_written: number;
-    /** v0.27: number of pattern pages written/updated by patterns phase. */
+    /** v0.23: number of pattern pages written/updated by patterns phase. */
     patterns_written: number;
   };
 }
@@ -157,7 +157,7 @@ export interface CycleOpts {
    */
   yieldBetweenPhases?: () => Promise<void>;
   /**
-   * Generic in-phase keepalive (v0.27). Long-running phases (synthesize
+   * Generic in-phase keepalive (v0.23). Long-running phases (synthesize
    * waiting on a fan-out aggregator, patterns rolling up reflections)
    * call this periodically while idle to renew the cycle-lock TTL and
    * the Minions worker job lock. Mirrors `yieldBetweenPhases` shape;
@@ -165,7 +165,7 @@ export interface CycleOpts {
    */
   yieldDuringPhase?: () => Promise<void>;
   /**
-   * Synthesize phase scope overrides (v0.27). Forwarded to runPhaseSynthesize.
+   * Synthesize phase scope overrides (v0.23). Forwarded to runPhaseSynthesize.
    * - `synthInputFile`: ad-hoc transcript path (`gbrain dream --input <file>`).
    * - `synthDate` / `synthFrom` / `synthTo`: date filters for corpus scan.
    * Mutually exclusive with each other in CLI parsing; runner trusts the
@@ -798,7 +798,7 @@ export async function runCycle(
       await safeYield(opts.yieldBetweenPhases);
     }
 
-    // ── Phase 4: synthesize (v0.27) ─────────────────────────────
+    // ── Phase 4: synthesize (v0.23) ─────────────────────────────
     if (phases.includes('synthesize')) {
       if (!engine) {
         phaseResults.push({
@@ -851,7 +851,7 @@ export async function runCycle(
       await safeYield(opts.yieldBetweenPhases);
     }
 
-    // ── Phase 6: patterns (v0.27) ───────────────────────────────
+    // ── Phase 6: patterns (v0.23) ───────────────────────────────
     // MUST run after extract so the graph state reads fresh — subagent
     // put_page calls in synthesize set ctx.remote=true, so auto-link
     // only fires for trusted-workspace writes (allow-listed). extract

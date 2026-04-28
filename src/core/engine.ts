@@ -271,7 +271,7 @@ export interface BrainEngine {
   putRawData(slug: string, source: string, data: object): Promise<void>;
   getRawData(slug: string, source?: string): Promise<RawData[]>;
 
-  // Dream-cycle significance verdict cache (v0.27).
+  // Dream-cycle significance verdict cache (v0.23).
   // Keyed by (file_path, content_hash). Distinct from raw_data, which is
   // page-scoped — transcripts being judged aren't pages yet.
   getDreamVerdict(filePath: string, contentHash: string): Promise<DreamVerdict | null>;

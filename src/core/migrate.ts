@@ -1068,7 +1068,7 @@ export const MIGRATIONS: Migration[] = [
   {
     version: 30,
     name: 'dream_verdicts_table',
-    // v0.27 synthesize phase: cache for "is this transcript worth processing?"
+    // v0.23 synthesize phase: cache for "is this transcript worth processing?"
     // verdict from the cheap Haiku judge. Distinct from raw_data (page-scoped);
     // transcripts aren't pages. Keyed by (file_path, content_hash) so edited
     // transcripts re-judge automatically. Backfill re-runs hit cache instead

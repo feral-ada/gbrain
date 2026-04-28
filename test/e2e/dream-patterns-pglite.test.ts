@@ -57,7 +57,7 @@ async function withoutAnthropicKey<T>(body: () => Promise<T>): Promise<T> {
 /**
  * Insert N reflection pages directly via engine.putPage so the patterns
  * gather query has data without going through the synthesize phase.
- * Slugs follow the v0.27 wiki/personal/reflections/<topic>-<hash> shape.
+ * Slugs follow the v0.23 wiki/personal/reflections/<topic>-<hash> shape.
  */
 async function seedReflections(engine: PGLiteEngine, count: number): Promise<void> {
   for (let i = 0; i < count; i++) {
