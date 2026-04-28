@@ -23,7 +23,7 @@ who discovers your server URL can:
 
 ### Recommended: `gbrain serve --http`
 
-As of v0.22.5, GBrain ships a built-in HTTP transport that uses the
+As of v0.22.7, GBrain ships a built-in HTTP transport that uses the
 existing `access_tokens` table for authentication:
 
 ```bash
@@ -63,7 +63,7 @@ gbrain auth test <url> --token <tok>   # Smoke-test a remote server
 Tokens are stored as SHA-256 hashes in the `access_tokens` table. The
 plaintext token is shown once at creation and never stored.
 
-## `gbrain serve --http` hardening (v0.22.5+)
+## `gbrain serve --http` hardening (v0.22.7+)
 
 The built-in HTTP transport ships with several layers of hardening on by
 default. All env vars below are optional; the defaults are intentionally

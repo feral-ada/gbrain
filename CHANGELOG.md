@@ -6,7 +6,7 @@ All notable changes to GBrain will be documented in this file.
 ## **Built-in HTTP transport with bearer auth. Remote MCP without the OAuth footgun.**
 ## **Postgres-only by design, default-deny CORS, two-bucket rate limit, body cap, full audit trail.**
 
-A standalone OAuth wrapper used to expose `gbrain serve` over HTTP allowed unauthenticated client registration ... an attacker who discovered the URL could `POST /register`, mint a `client_credentials` token, and read the entire brain. v0.22.5 ships `gbrain serve --http`: the smallest correct HTTP transport you can build on top of `access_tokens`. No OAuth surface, no registration endpoint, no self-service tokens. Bearer-only, with the existing `gbrain auth create/list/revoke` already managing the lifetime.
+A standalone OAuth wrapper used to expose `gbrain serve` over HTTP allowed unauthenticated client registration ... an attacker who discovered the URL could `POST /register`, mint a `client_credentials` token, and read the entire brain. v0.22.7 ships `gbrain serve --http`: the smallest correct HTTP transport you can build on top of `access_tokens`. No OAuth surface, no registration endpoint, no self-service tokens. Bearer-only, with the existing `gbrain auth create/list/revoke` already managing the lifetime.
 
 Because this is the security-sensitive path your agent talks to, the hardening lives inside the transport, not in the doc:
 
@@ -65,7 +65,7 @@ While ripping the transport out and rebuilding it, three pre-existing bugs in th
 - Tests: 23 unit + 8 E2E covering auth, dispatch, CORS, body cap, rate limit, and audit
 - Docs: SECURITY.md + DEPLOY.md updated to recommend `--http` and document the env vars
 
-## To take advantage of v0.22.5
+## To take advantage of v0.22.7
 
 `gbrain upgrade` should do this automatically. If it didn't, or if you want to expose your brain over HTTP:
 

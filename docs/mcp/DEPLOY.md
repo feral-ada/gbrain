@@ -1,6 +1,6 @@
 # Deploy GBrain Remote MCP Server
 
-> **v0.22.5+:** Use `gbrain serve --http` for remote access. It includes built-in
+> **v0.22.7+:** Use `gbrain serve --http` for remote access. It includes built-in
 > bearer token auth, default-deny CORS, two-bucket rate limiting, body cap, and
 > per-request audit log. **Postgres-only** (PGLite is local-only by design).
 > See [SECURITY.md](../../SECURITY.md) for env vars and tunable defaults.
@@ -53,13 +53,13 @@ ngrok http 8787 --url your-brain.ngrok.app  # Hobby tier for fixed domain
 
 ```bash
 # Create a token for each client
-bun run src/commands/auth.ts create "claude-desktop"
+gbrain auth create "claude-desktop"
 
 # List all tokens
-bun run src/commands/auth.ts list
+gbrain auth list
 
 # Revoke a token
-bun run src/commands/auth.ts revoke "claude-desktop"
+gbrain auth revoke "claude-desktop"
 ```
 
 Tokens are per-client. Create one for each device/app. Revoke individually
@@ -75,7 +75,7 @@ if compromised. Tokens are stored SHA-256 hashed in your database.
 ### 4. Verify
 
 ```bash
-bun run src/commands/auth.ts test \
+gbrain auth test \
   https://YOUR-DOMAIN.ngrok.app/mcp \
   --token YOUR_TOKEN
 ```
@@ -103,7 +103,7 @@ Funnel, and cloud hosts (Fly.io, Railway).
 Include the Authorization header: `Authorization: Bearer YOUR_TOKEN`
 
 **"invalid_token" error**
-Run `bun run src/commands/auth.ts list` to see active tokens.
+Run `gbrain auth list` to see active tokens.
 
 **"service_unavailable" error**
 Database connection failed. Check your Supabase dashboard for outages.
