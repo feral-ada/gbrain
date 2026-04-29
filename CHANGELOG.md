@@ -82,6 +82,321 @@ If anything looks off, file an issue at <https://github.com/garrytan/gbrain/issu
 
 - The eng-review path forward is documented in `~/.claude/plans/lets-take-a-look-ticklish-pizza.md` (15 numbered defects + D1-D8 abstraction calls). Every commit on this branch maps to one numbered step in the plan.
 
+## [0.22.9] - 2026-04-29
+
+**Sync failures now tell you why, not just how many.**
+**`gbrain sync --skip-failed` and `gbrain doctor` group failures by error code, so 2,685 silent SLUG_MISMATCH files don't hide behind a single count.**
+
+Before this release, when sync hit per-file parse errors the only signal was a number:
+
+```
+Sync blocked: 2688 file(s) failed to parse. Fix the YAML frontmatter...
+```
+
+That count is useless when you're staring at 2,688 files and don't know what's wrong. On a real 81K-page brain, 2,685 of those turned out to be `SLUG_MISMATCH` from a posterous import — a single root cause hiding behind a giant number. It took manual `cat ~/.gbrain/sync-failures.jsonl | jq` to figure that out.
+
+After:
+
+```
+Sync blocked: 2688 file(s) failed to parse:
+  SLUG_MISMATCH: 2685
+  YAML_DUPLICATE_KEY: 3
+
+Fix the YAML frontmatter in the files above and re-run, or use 'gbrain sync --skip-failed' to acknowledge and move on.
+
+# gbrain sync --skip-failed
+Acknowledged 2688 failure(s) and advancing past them:
+  SLUG_MISMATCH: 2685
+  YAML_DUPLICATE_KEY: 3
+```
+
+`gbrain doctor` shows the same breakdown for unacknowledged AND historical entries:
+
+```
+[WARN] sync_failures: 2688 unacknowledged sync failure(s) [SLUG_MISMATCH=2685, YAML_DUPLICATE_KEY=3].
+[OK]   sync_failures: 500544 historical sync failure(s), all acknowledged [SLUG_MISMATCH=2685, ...].
+```
+
+The classifier knows the canonical messages from `collectValidationErrors()` in `src/core/markdown.ts` (8 frontmatter codes), Postgres unique-constraint violations (`DB_DUPLICATE_KEY`), statement-timeout errors (`STATEMENT_TIMEOUT`), invalid UTF-8, and YAML duplicates. DB-layer errors check before YAML-layer ones — so a Postgres `duplicate key value violates unique constraint` no longer mislabels as a YAML duplicate. Unrecognized errors fall through to `UNKNOWN`.
+
+### What this means for you
+
+If `gbrain sync` blocks with parse failures, the breakdown tells you what to fix first. SLUG_MISMATCH is one fix-pattern (frontmatter says one slug, path says another); YAML_PARSE is a different one (malformed YAML); STATEMENT_TIMEOUT means a DB timeout, not a parse problem. You stop staring at counts and start fixing root causes.
+
+### For contributors
+
+`acknowledgeSyncFailures()` in `src/core/sync.ts` now returns `{count, summary}` instead of `number`. If you import this directly from `gbrain/sync`, replace `n` with `result.count` and use `result.summary` (an `Array<{code, count}>`) for the new code-grouped breakdown. The function is reachable via the package exports map; this is a deliberate, non-shimmed breaking change. There is a new `formatCodeBreakdown()` helper in the same module that accepts either raw failures or pre-summarized input — use it instead of building breakdown strings inline.
+
+### Itemized changes
+
+#### Added
+
+- `classifyErrorCode(errorMsg)` in `src/core/sync.ts` — best-effort error-code extraction from sync failure messages. Codes: `SLUG_MISMATCH`, `YAML_PARSE`, `YAML_DUPLICATE_KEY`, `MISSING_OPEN`, `MISSING_CLOSE`, `EMPTY_FRONTMATTER`, `NULL_BYTES`, `NESTED_QUOTES`, `DB_DUPLICATE_KEY`, `STATEMENT_TIMEOUT`, `INVALID_UTF8`, `UNKNOWN`.
+- `summarizeFailuresByCode(failures)` — groups failures by code and returns a sorted `Array<{code, count}>`.
+- `formatCodeBreakdown(input)` — renders a multi-line `code: count` string from either raw failures or a pre-computed summary. Single helper, two input shapes.
+- `code?: string` field on the `SyncFailure` JSONL row in `~/.gbrain/sync-failures.jsonl`. Populated at write-time so the classifier runs once per failure, not on every load.
+- `AcknowledgeResult` interface as the new return shape of `acknowledgeSyncFailures()`.
+- 15 new test cases in `test/sync-failures.test.ts`: DB-vs-YAML duplicate-key disambiguation, canonical-message coverage for all 7 frontmatter codes, `acknowledgeSyncFailures()` legacy-entry backfill branch, `formatCodeBreakdown()` dual-input shape.
+
+#### Changed
+
+- `gbrain sync` blocked-message: now lists code breakdown above the fix instructions (both incremental and full-sync paths).
+- `gbrain sync --skip-failed` ack message: now lists what was skipped, grouped by code.
+- `gbrain doctor` `sync_failures` check: warn-and-ok messages both include `[code=count, ...]` breakdown.
+- `recordSyncFailures()` now stores `code` alongside `error` so downstream readers don't re-classify.
+- `acknowledgeSyncFailures()` backfills `code` on legacy rows that predate the field — upgrade-safe for users with existing `~/.gbrain/sync-failures.jsonl`.
+- DB-layer error patterns (`DB_DUPLICATE_KEY`, `STATEMENT_TIMEOUT`) check BEFORE YAML patterns in the classifier, so Postgres errors don't get YAML-labeled.
+- Frontmatter regex patterns rewritten to match canonical messages from `collectValidationErrors()` (`File is empty...`, `No closing --- delimiter found`, `Frontmatter block is empty`) instead of aspirational code-token strings (`missing.*open`) that never appeared in practice.
+
+Closes #500. Eng-review plan: `~/.claude/plans/then-codex-synchronous-toucan.md` (codex outside-voice agreed on all 7 findings).
+
+## [0.22.8] - 2026-04-28
+
+## **Doctor stops timing out on Supabase. Integrity scan finishes in ~6s, multi-source brains get correct counts.**
+
+If you've been hitting the 60-second `gbrain doctor` timeout on Supabase or any pooled-connection deployment, this fixes it. The integrity check used to call `getPage()` 500 times sequentially through PgBouncer transaction-mode pooling. Each call required a full connection acquire/release cycle, which doctor couldn't finish before CI killed it. The new path batch-loads all 500 pages in a single SQL query, finishing in ~6s.
+
+While shipping the perf fix, codex review caught a correctness regression for multi-source brains: the batch SQL was scanning raw `(source_id, slug)` rows while the sequential path scanned unique slugs. Multi-source brains were getting inflated counts. `SELECT DISTINCT ON (slug)` mirrors the sequential path's `Set<string>` semantics; parity tests against real Postgres pin both paths to the same output.
+
+Plus a Linux CI fix: `gbrain skillpack` lockfile checks were intermittently failing on ext4's sub-millisecond `mtimeMs` timestamps when `Date.now()` returned an integer ms behind the file's recorded mtime. Lock age now clamps to zero.
+
+### The numbers that matter
+
+Measured against the real failure mode on a Supabase PgBouncer deployment that hit the 60s CI timeout pre-fix.
+
+| Behavior | Before v0.22.8 | After v0.22.8 |
+|---|---|---|
+| `gbrain doctor` wall-clock (Postgres + PgBouncer) | 60s+ timeout (killed) | ~6s |
+| `integrity_sample` query round-trips | ~500 (sequential `getPage`) | 1 (`SELECT DISTINCT ON`) |
+| Multi-source brain scan accuracy | Overcounted by `source_id` | Exact per unique slug |
+
+### What this means for Supabase deployments
+
+If you've been avoiding `gbrain doctor` because it timed out, run it again. If you maintain a multi-source brain (imported pages from another gbrain deployment under a non-default `source_id`), the scan now treats each slug once instead of once-per-source — your output is exact, not inflated. Single-source users see no behavior change; PGLite users were never affected (the batch path is Postgres-only).
+
+## To take advantage of v0.22.8
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about anything afterwards:
+
+1. **Run the upgrade:**
+   ```bash
+   gbrain upgrade
+   ```
+2. **Verify doctor finishes cleanly (especially relevant if you hit timeouts before):**
+   ```bash
+   gbrain doctor
+   ```
+   On Postgres + PgBouncer deployments, you should see `integrity_sample` finish in ~6s instead of timing out at 60s.
+3. **If `doctor` still times out or output looks wrong,** please file an issue:
+   https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor` (full)
+   - which engine (Postgres vs PGLite)
+   - whether you use multi-source brains
+
+### Itemized changes
+
+#### Performance
+- `gbrain doctor` integrity sample now batch-loads via a single SQL query on Postgres deployments (60s+ timeout → ~6s wall-clock, 500 round-trips → 1).
+- Batch path explicitly gated to Postgres via `engine.kind` so PGLite never attempts it (clean fallback signal).
+
+#### Correctness
+- `scanIntegrity` batch path uses `SELECT DISTINCT ON (slug)` to scope by unique slug, matching `engine.getAllSlugs()`'s `Set<string>` semantics. Multi-source brains (UNIQUE(source_id, slug) since v0.18.0) now get correct counts instead of one-scan-per-source-row.
+- `IntegrityScanResult.pagesScanned` now reflects unique slugs scanned, not raw row count. Single-source brains: unchanged. Multi-source brains: counts now match expected distinct-page semantics.
+- Batch-path fallback narrowed: real Postgres errors (deadlock, connection drop, SQL bug) surface via `GBRAIN_DEBUG=1` instead of being silently swallowed.
+
+#### Tests
+- New `test/e2e/integrity-batch.test.ts` — four parity cases (dedup, hits, validate, topPages) asserting batch ≡ sequential against real Postgres. Pinning the multi-source dedup case requires a raw-SQL fixture for the alt-source row since `engine.putPage` doesn't take a `source_id`.
+
+#### Infrastructure
+- `src/core/skillpack/installer.ts` — clamp negative lock-age to 0, fixing intermittent Linux ext4 CI flakes from sub-millisecond `mtimeMs` precision (Date.now is integer ms; mtime can be ~0.3ms ahead). New regression test in `test/skillpack-install.test.ts` deterministically reproduces via `utimesSync`.
+- `CLAUDE.md` test inventory updated for the new test files.
+
+## [0.22.7] - 2026-04-28
+
+## **Built-in HTTP transport with bearer auth for remote MCP.**
+## **Postgres-backed tokens, default-deny CORS, two-bucket rate limit, body cap, per-request audit.**
+
+v0.22.7 ships `gbrain serve --http`: a built-in HTTP transport for remote MCP, authenticating via the existing `access_tokens` table that `gbrain auth create/list/revoke` already manages. Bearer-only, no OAuth surface, no registration endpoint, no self-service tokens. SECURITY.md is the canonical reference for the hardening posture and recommended deployment.
+
+The hardening lives inside the transport, not in the doc:
+
+| Layer | Default | Configurable via |
+|---|---|---|
+| CORS | default-deny (no `Access-Control-Allow-Origin`) | `GBRAIN_HTTP_CORS_ORIGIN=a.com,b.com` |
+| Pre-auth IP rate limit | 30 req / 60s | `GBRAIN_HTTP_RATE_LIMIT_IP` |
+| Post-auth token rate limit | 60 req / 60s | `GBRAIN_HTTP_RATE_LIMIT_TOKEN` |
+| Body cap | 1 MiB, stream-counted | `GBRAIN_HTTP_MAX_BODY_BYTES` |
+| `last_used_at` debounce | once per token per 60s | (SQL-level WHERE clause, race-tolerant) |
+| Per-request audit | `mcp_request_log` row per `/mcp` | (existing schema, since v4) |
+| Reverse-proxy trust | off | `GBRAIN_HTTP_TRUST_PROXY=1` to honor X-Forwarded-For |
+
+The IP rate-limit fires **before** the auth lookup so the limit caps load on the auth path itself, not just response codes. The token-id rate limit fires after auth so a runaway authenticated client gets throttled at the right principal. Both buckets live in a bounded LRU map (default 10K keys, TTL prune at 2× window) so unique-key growth can't drift into memory pressure.
+
+### What changed for users
+
+You can now expose GBrain remotely with the built-in transport:
+
+```bash
+gbrain auth create my-laptop                    # tokens managed via the existing CLI
+gbrain serve --http --port 8787                  # Postgres-only; PGLite users see a clear fail-fast
+ngrok http 8787 --url your-brain.ngrok.app       # any tunnel works
+```
+
+Then point Claude Desktop, claude.ai/code, or any MCP client at `http://your-tunnel/mcp` with `Authorization: Bearer <token>`. CORS, rate limits, and body caps are on by default. `gbrain auth` is now wired into the main CLI, so it works from the compiled binary the same as `gbrain doctor` or `gbrain serve`.
+
+### For contributors
+
+- `src/mcp/dispatch.ts` (new) — shared `dispatchToolCall(engine, name, params, opts)` consumed by both stdio (`server.ts`) and HTTP (`http-transport.ts`). One source of truth for `validateParams`, `OperationContext` construction, and handler invocation, so the two transports can't drift apart.
+- `src/mcp/rate-limit.ts` (new) — bounded-LRU token-bucket. Tracks `lastTouchedMs` separately from `lastRefillMs` so an exhausted key can't be reset by hammering past the TTL.
+- `src/mcp/http-transport.ts` — built on the new dispatch + rate-limit modules. `application/json` response shape (gbrain MCP tools are synchronous; the Streamable HTTP transport spec allows JSON for non-streaming responses).
+- `src/cli.ts` + `src/commands/auth.ts` — `auth` is now a wired CLI subcommand. Direct-script usage (`bun run src/commands/auth.ts ...`) still works for environments without a compiled binary.
+- 23 unit cases in `test/http-transport.test.ts`, 8 E2E cases in `test/e2e/http-transport.test.ts`. Unit covers the full dispatch round-trip with a real operation; E2E covers `last_used_at` debounce against real Postgres semantics.
+
+### Known limits
+
+- `gbrain serve --http` is **Postgres-only**. PGLite has no `access_tokens` or `mcp_request_log` table by design (`src/core/pglite-schema.ts:5-6`). Local agents continue to use stdio (`gbrain serve`).
+- Behind a tunnel (ngrok, Tailscale Funnel, Cloudflare Tunnel), all requests share one egress IP. The pre-auth IP bucket becomes effectively shared by all clients on that tunnel; the token-id bucket is the load-bearing limiter for tunnel deployments. Documented in SECURITY.md.
+
+### Itemized changes
+
+- New: `gbrain serve --http [--port N]` ships the built-in HTTP transport
+- New: `gbrain auth create/list/revoke/test` wired into the main CLI (was a standalone script)
+- New: SECURITY.md documents the disclosure path, the recommended remote-MCP setup, and the full hardening reference
+- New: `src/mcp/dispatch.ts` — shared dispatch path for stdio + HTTP
+- New: `src/mcp/rate-limit.ts` — bounded-LRU token-bucket limiter
+- Hardening: CORS default-deny, two-bucket rate limit (per-IP pre-auth + per-token post-auth), 1 MiB body cap with stream-counted enforcement, `mcp_request_log` per-request audit, `last_used_at` SQL-level debounce
+- Tests: 23 unit + 8 E2E covering auth, dispatch, CORS, body cap, rate limit, and audit
+- Docs: SECURITY.md, DEPLOY.md, and per-client setup guides updated to recommend `--http` and document the env vars
+
+## To take advantage of v0.22.7
+
+`gbrain upgrade` should do this automatically. If it didn't, or if you want to expose your brain over HTTP:
+
+1. **Confirm migrations are at v4 or higher** (the `access_tokens` + `mcp_request_log` tables were added in migration v4):
+   ```bash
+   gbrain doctor              # schema_version check should pass
+   gbrain apply-migrations --yes  # if not, run this
+   ```
+2. **Create a token for each remote client:**
+   ```bash
+   gbrain auth create my-laptop     # prints the token once — copy it
+   ```
+3. **Start the HTTP server:**
+   ```bash
+   gbrain serve --http --port 8787
+   ```
+4. **(Optional) configure CORS allowlist if a browser client will hit it:**
+   ```bash
+   GBRAIN_HTTP_CORS_ORIGIN=https://claude.ai gbrain serve --http --port 8787
+   ```
+5. **(Optional) audit who's hitting your brain:**
+   ```bash
+   psql $DATABASE_URL -c "SELECT created_at, token_name, operation, status, latency_ms
+                          FROM mcp_request_log ORDER BY created_at DESC LIMIT 50"
+   ```
+6. **If `gbrain serve --http` exits with "Postgres engine required":** PGLite is local-only by design. Either keep using stdio (`gbrain serve`) for local agents, or migrate to Postgres (`gbrain migrate --to supabase`).
+
+If anything breaks: `gbrain doctor`, `~/.gbrain/upgrade-errors.jsonl` (if present), and please file an issue at https://github.com/garrytan/gbrain/issues with both.
+
+
+
+## [0.22.6.1] - 2026-04-26
+
+**Old brains can upgrade again.**
+**Two-year, ten-issue wedge cycle ends. Pre-v0.13/v0.18/v0.19 brains all upgrade clean.**
+
+If you've been pinned to an older gbrain because `gbrain upgrade` wedges your brain
+with `column "source_id" does not exist` or `column "link_source" does not exist`,
+v0.22.6.1 unblocks you. The fix lives in `initSchema()` itself, where it should
+have lived all along.
+
+The bug class is structural: gbrain ships an "embedded latest schema" SQL blob
+that runs before numbered migrations on every connect. The blob references
+columns that newer migrations introduce. On any brain older than the migration
+that adds those columns, the blob crashes before the migration can run. This
+incident family hit users 10+ times across 6 schema versions over 2 years
+(issues #239, #243, #266, #357, #366, #374, #375, #378, #395, #396).
+
+The fix is a narrow pre-schema bootstrap. `initSchema()` now probes for the
+specific forward-referenced state the schema blob needs (`pages.source_id`,
+`links.link_source`, `links.origin_page_id`, `content_chunks.symbol_name`,
+`content_chunks.language`, plus the `sources` FK target table) and adds only
+that state if missing. Then SCHEMA_SQL replays cleanly. Then the normal
+migration chain runs as usual. Fresh installs and modern brains both no-op.
+
+A test guard prevents this incident family from recurring. Every future
+migration that adds a column-with-index to PGLITE_SCHEMA_SQL must extend the
+bootstrap; the CI guard fails loudly if not. The pattern that broke gbrain ten
+times in two years is now structurally prevented.
+
+Also includes the v24 PGLite RLS fix from #395 (community PR by @jdcastro2):
+`rls_backfill_missing_tables` now no-ops on PGLite via `sqlFor.pglite: ''`,
+since PGLite has no RLS engine and is single-tenant by definition.
+
+### The numbers that matter
+
+| Metric | v0.22.0 | v0.22.6.1 | Δ |
+|---|---|---|---|
+| Pre-v0.13 brain upgrades cleanly | wedges on `link_source` | passes | ✓ |
+| Pre-v0.18 brain upgrades cleanly | wedges on `source_id` | passes | ✓ |
+| Pre-v0.21 brain upgrades cleanly | wedges on `symbol_name` | passes | ✓ |
+| v24 RLS migration on PGLite | wedges (table doesn't exist) | no-op | ✓ |
+| Issues closed | — | #366, #375, #378, #395, #396 | 5 |
+| Issue families resolved | — | wedge-cycle | the whole class |
+
+### What this means for you
+
+If you've been on v0.13.x, v0.14.x, v0.17.x, v0.18.x, v0.19.x, v0.20.x, or v0.22.0 and
+your `gbrain upgrade` failed, run it again. It should walk to v0.22.6.1 cleanly.
+If you wedged on the v24 RLS migration on a PGLite brain, the same thing.
+
+If you're on a fresh install or already on v0.22.0, this patch is invisible.
+The bootstrap probe runs once per connect, sees nothing to do, and returns.
+
+### Itemized changes
+
+#### Fixed
+- `gbrain upgrade` no longer wedges on pre-v0.18 brains that lack `pages.source_id`. The schema blob's `CREATE INDEX idx_pages_source_id` previously crashed before migration v21 could add the column. Closes #366, #375, #378, #396.
+- `gbrain upgrade` no longer wedges on pre-v0.13 brains that lack `links.link_source` or `links.origin_page_id`. The schema blob's `CREATE INDEX idx_links_source/origin` previously crashed before migration v11 could add the columns. Closes #266, #357.
+- `gbrain upgrade` no longer wedges on pre-v0.19 brains that lack `content_chunks.symbol_name` or `content_chunks.language`. The schema blob's partial indexes previously crashed before migration v26 could add the columns.
+- Migration v24 (`rls_backfill_missing_tables`) no-ops on PGLite via `sqlFor.pglite: ''`. PGLite has no RLS engine and is single-tenant. The migration previously tried to ALTER subagent tables that don't exist in pglite-schema.ts. Closes #395. Contributed by @jdcastro2.
+
+#### Changed
+- `PGLiteEngine.initSchema()` and `PostgresEngine.initSchema()` now call a new private `applyForwardReferenceBootstrap()` before running the embedded schema blob. The bootstrap probes for missing forward-referenced state and adds only what's needed. No-op on fresh installs and modern brains.
+
+#### For contributors
+- New CI guard `test/schema-bootstrap-coverage.test.ts` enforces that `applyForwardReferenceBootstrap` covers every forward reference in PGLITE_SCHEMA_SQL. When you add a new column-with-index in the schema blob, extend `REQUIRED_BOOTSTRAP_COVERAGE` and the bootstrap function. The test fails loudly if you skip step one.
+- New `test/bootstrap.test.ts` covers the bootstrap contract: no-op on fresh install, idempotent, no-op on modern brain, full path pre-v0.18, fresh-install regression, pre-v0.13 links shape.
+- New `test/e2e/postgres-bootstrap.test.ts` exercises `PostgresEngine.initSchema()` directly (not the standalone `db.initSchema` from `src/core/db.ts`, which only runs SCHEMA_SQL and would have produced false-positive coverage). Codex caught this E2E shape gap during plan review.
+- Wave PRs incorporated with attribution: @vinsew (#398), @jdcastro2 (#399), @schnubb-web (#402). The narrow-bootstrap shape supersedes #402's broader "run all migrations early" approach, which would have crashed on v24 trying to alter tables that the schema blob hadn't created yet (codex finding during plan review).
+
+## To take advantage of v0.22.6.1
+
+`gbrain upgrade` should do this automatically. If you're currently wedged on a
+prior version's upgrade attempt:
+
+1. **Run the upgrade:**
+   ```bash
+   gbrain upgrade
+   ```
+2. **Verify the outcome:**
+   ```bash
+   gbrain doctor
+   ```
+   Expected: `schema_version: Version 29 (latest: 29)` clean, no
+   `column "..." does not exist` errors, no wedged migration ledger.
+
+3. **If wedged after upgrade,** run the migration runner directly:
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+
+4. **If any step still fails,** please file an issue:
+   https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - your prior gbrain version (`gbrain --version`)
+   - which step broke
+
 ## [0.22.6] - 2026-04-28
 
 ### Schema verification after migrations

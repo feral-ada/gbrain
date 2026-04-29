@@ -1,5 +1,114 @@
 # TODOS
 
+## sync error-code classification (PR #501 follow-ups)
+
+### Plumb structured `ParseValidationCode` through `ImportResult`
+**Priority:** P2
+
+**What:** Replace the regex-on-error-message path in `src/core/sync.ts:classifyErrorCode`
+with a structured `code` field threaded through `ImportResult` from the parse layer.
+
+Three changes:
+1. `src/core/import-file.ts:362` — call `parseMarkdown(content, relativePath, { validate: true, expectedSlug })`
+   so `parsed.errors[0].code` is populated.
+2. `src/core/import-file.ts` — add `code?: string` to `ImportResult`. Promote the
+   structured code (or `'SLUG_MISMATCH'` when the existing expectedSlug check trips)
+   into the result envelope alongside `error`.
+3. `src/commands/sync.ts:488` — extend `failedFiles` shape with `code?: string`.
+   `recordSyncFailures` already accepts the field; the only thing missing is the
+   capture site populating it.
+4. `src/core/sync.ts:classifyErrorCode` — keep as a fallback for un-coded errors
+   (DB exceptions, generic catches). Primary path reads the structured code.
+
+**Why:** The repo already has `ParseValidationCode` + `ParseValidationError` in
+`src/core/markdown.ts:5-18`, and three other consumers (`src/commands/lint.ts:72`,
+`src/commands/frontmatter.ts:148`, `src/core/brain-writer.ts:314`) read structured
+errors directly. Sync is the outlier — it calls `parseMarkdown` without validation
+and reverse-engineers codes via regex. PR #501 shipped that regex out of pragmatism;
+this TODO removes ~50% of `classifyErrorCode` and eliminates a class of false-positives.
+
+**Pros:**
+- One source of truth for parse codes (the enum in `markdown.ts`).
+- Eliminates regex fragility — adding a new validation code in `markdown.ts`
+  automatically flows to sync without a new regex.
+- Closes the case where canonical messages (`File is empty...`, `No closing ---...`)
+  don't match aspirational regex patterns.
+
+**Cons:** Touches `ImportResult` interface, which ripples through `src/commands/import.ts:105`,
+`src/commands/sync.ts:498-510`, `src/core/cycle.ts`, brain-writer reconciler.
+
+**Context:** PR #501 documented this as P3 in the eng review at
+`~/.claude/plans/then-codex-synchronous-toucan.md`. Codex's outside-voice review
+agreed independently. The fix is small — ~50 lines including tests + downstream
+call sites — and it's the correct architectural endpoint.
+
+**Effort:** M (human: ~2 hr / CC: ~20 min).
+
+**Depends on / blocked by:** Nothing.
+
+### CHANGELOG migration note for `acknowledgeSyncFailures()` shape change
+**Priority:** P0 — required at /ship time
+
+**What:** When PR #501 ships, the release CHANGELOG entry MUST include this
+`### For contributors` block:
+
+```markdown
+### For contributors
+
+`acknowledgeSyncFailures()` now returns `{count, summary}` instead of `number`.
+If you import this directly from `gbrain/sync`, replace `n` with `result.count`
+and use `result.summary` for the new code-grouped breakdown.
+```
+
+**Why:** The function is exported from `src/core/sync.ts:433` and reachable via
+the package exports map. External TS consumers (gbrain-evals, host agent forks)
+that imported it got `number` and now get an object — silent type break.
+
+**Effort:** XS (human: ~1 min). Just don't forget.
+
+**Depends on / blocked by:** PR #501 ship.
+
+### Concurrent-safe ack of `~/.gbrain/sync-failures.jsonl`
+**Priority:** P3
+
+**What:** Two concurrent `gbrain sync` runs hitting `acknowledgeSyncFailures()`
+can clobber each other. The function does a whole-file `writeFileSync` rewrite
+(`src/core/sync.ts:433-455`); `recordSyncFailures()` does independent
+`appendFileSync` (`src/core/sync.ts:395-416`). Concurrent ack + append can lose rows.
+
+**Why:** Pre-existing — predates PR #501. Real risk only on autopilot setups where
+multiple sync invocations might overlap (rare today, more likely as multi-source
+sync matures).
+
+**Fix sketch:** Atomic rename pattern (write to `sync-failures.jsonl.tmp`, then
+`renameSync`) plus a file lock for the read-modify-write cycle. Or move the
+acknowledged-set to the DB.
+
+**Effort:** S (human: ~1 hr / CC: ~10 min).
+
+**Depends on / blocked by:** Nothing.
+
+## test-infra
+
+### Parallel-load timeout flake on v0.21 PGLite-heavy tests
+**Priority:** P0
+
+**What:** 22 tests added in v0.21.0 (Code Cathedral II) consistently fail in the full `bun test` run with timeout-pattern elapsed times of 7-10s, but pass in isolation. Every failing test calls `engine.initSchema()` in `beforeAll` without a timeout extension. Under parallel load (168 test files now run concurrently after v0.21 added ~24 new files), `initSchema` exceeds bun's default 5s `beforeAll` timeout.
+
+Affected files include (non-exhaustive): `test/sync-strategy.test.ts`, `test/cathedral-ii-brainbench.test.ts`, `test/code-edges.test.ts`, `test/reindex-code.test.ts`, `test/reconcile-links.test.ts`, `test/two-pass.test.ts`, `test/parent-symbol-path.test.ts`, `test/pglite-v0_19.test.ts`.
+
+**Why:** Currently triaged as "skip pre-existing, ship anyway" but that's not a real fix. Blocks /ship for anyone whose CHANGELOG-time test run sees them.
+
+**Pros:** Fixing it lets /ship run cleanly without manual triage every release.
+
+**Cons:** ~22 file edits adding `beforeAll(async () => {...}, 30000)` is mechanical but dull.
+
+**Context:** Same pattern fixed in v0.20.5 wave for `test/e2e/minions-shell-pglite.test.ts`. Single-file repro: each fails in `bun test`, passes in `bun test <file>`. Reproduces with my changes stashed, so it's on master.
+
+**Effort:** S (human: ~30 min / CC: ~5 min). Mechanical: grep for `beforeAll(async () => {` in affected files, add `, 30000)` argument.
+
+**Depends on / blocked by:** Nothing.
+
 ## resolver / check-resolvable (v0.22.4 follow-ups)
 
 ### D10 — Extend `check-resolvable` to parse RESOLVER.md disambiguation rules
@@ -564,3 +673,90 @@ iteration's residuals.
 **Effort estimate:** S (human: ~2 hr / CC: ~10 min).
 **Priority:** P3.
 **Depends on:** The above caller-opt-in retry (#1) is the natural co-lander since both touch the same error-classification surface.
+
+## remote MCP / HTTP transport (v0.22.7 follow-ups)
+
+### Audit-log write amplification on rejected `/mcp` traffic
+**What:** `src/mcp/http-transport.ts` writes a row to `mcp_request_log` for every
+incoming `/mcp` request, including rate-limited (429), oversized (413), and
+auth-failed (401) traffic. Under sustained attack the IP rate limit caps audit
+writes per IP at 30/min, but at scale (10K distinct IPs) that's still 300K
+inserts/min. Two follow-ups: (1) instrument the audit-write rate so we can see
+the actual production volume; (2) consider a separate "rejected" table or
+sampling for failed-auth rows so the success-path audit table doesn't get
+swamped.
+
+**Why:** Codex flagged this during the v0.22.7 ship adversarial review. We kept
+the full audit on purpose — forensic data of an attack is valuable — but want
+to revisit once we have real volume numbers.
+
+**Pros:** Bounds DB write volume under attack. Keeps the success-path audit
+table small enough for fast queries.
+
+**Cons:** Adds a second table or a sampling rule. Not free complexity. Probably
+not worth it until production hits a real attack pattern.
+
+**Context:** `src/mcp/http-transport.ts:222,235,245` (the three audit-on-reject
+call sites) + `src/schema.sql:342` (the unbounded table).
+
+**Effort estimate:** M (human: ~half day / CC: ~30 min once we have volume data).
+**Priority:** P3 — wait for evidence.
+**Depends on:** Production telemetry on `mcp_request_log` insert rate.
+
+### `validateParams` doesn't check enum values or array item types
+**What:** `src/mcp/dispatch.ts:27` (extracted from `src/mcp/server.ts` in
+v0.22.7) only checks top-level JS types. Operations declare `enum` constraints
+(e.g. `direction: 'in' | 'out' | 'both'`) and array `items: { type: ... }`
+schemas in `src/core/operations.ts`, but `validateParams` ignores both. Bad
+inputs still reach handlers — concretely, an invalid `direction` falls through
+the engine's else branch at `src/core/postgres-engine.ts:954`, widening
+traversal unexpectedly; malformed `pages_updated` arrays could be written as
+garbage JSONB.
+
+**Why:** Codex flagged this during the v0.22.7 ship adversarial review. The
+validator was lifted verbatim from the pre-existing stdio path during the
+dispatch.ts extraction — same gap exists on the stdio MCP server today, so
+this isn't a v0.22.7 regression. Still worth tightening, since "shared
+validation" is now the architectural guarantee both transports rely on.
+
+**Pros:** Better defense-in-depth at the MCP boundary. Catches malformed agent
+inputs before the engine layer has to.
+
+**Cons:** Need to walk every operation's param schema and decide which enum
+violations are user-facing errors vs internal bugs. May need a typed Zod-style
+schema layer to do this cleanly.
+
+**Context:** `src/mcp/dispatch.ts:27` + `src/core/operations.ts` (param defs).
+Same gap pre-existed on stdio MCP path.
+
+**Effort estimate:** M (human: ~half day / CC: ~30 min if we use the existing
+ParamDef shape; XL if a Zod migration is the chosen direction).
+**Priority:** P2.
+**Depends on:** Whether we want to keep the lightweight ParamDef shape or
+migrate to typed schemas.
+
+### Streaming MCP tool support (re-add SSE based on Accept header)
+**What:** v0.22.7 dropped SSE entirely from `gbrain serve --http` because no
+current MCP tool streams. When the first streaming tool ships (long-running
+agent delegation as an MCP tool, `resources/subscribe`, `sampling/createMessage`),
+re-add SSE in `/mcp` based on the `Accept` header per the Streamable HTTP
+transport spec. ~30 lines + spec compliance test.
+
+**Why:** Removing SSE simplified the v0.22.7 transport (one response path,
+fewer test cases). Adding it back when actually needed is cheap and keeps the
+code lean in the meantime.
+
+**Effort estimate:** S (human: ~2 hr / CC: ~15 min).
+**Priority:** P3 — wait for the first streaming tool.
+**Depends on:** A streaming MCP tool actually existing.
+
+### `access_tokens.scopes` enforcement
+**What:** The `access_tokens` schema has had a `scopes TEXT[]` column since
+migration v4 (`src/core/migrate.ts:84`), but nothing enforces it. v0.22.7's
+`gbrain auth create` doesn't accept a `--scopes` flag, and `dispatchToolCall`
+doesn't gate on scopes. Adding per-tool scope enforcement would let
+"claude-desktop-readonly" and "ingest-only" tokens exist.
+
+**Effort estimate:** M (human: ~1 day / CC: ~30 min for the schema-aware gate).
+**Priority:** P3.
+**Depends on:** Nothing.
