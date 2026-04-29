@@ -12,7 +12,7 @@ import {
   recordSyncFailures,
   unacknowledgedSyncFailures,
   acknowledgeSyncFailures,
-  summarizeFailuresByCode,
+  formatCodeBreakdown,
 } from '../core/sync.ts';
 import { estimateTokens, CHUNKER_VERSION } from '../core/chunkers/code.ts';
 import { EMBEDDING_MODEL, estimateEmbeddingCostUsd } from '../core/embedding.ts';
@@ -525,8 +525,7 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
     recordSyncFailures(failedFiles, headCommit);
     // Emit structured summary grouped by error code so the operator
     // can see *why* files failed, not just how many.
-    const codeSummary = summarizeFailuresByCode(failedFiles);
-    const codeBreakdown = codeSummary.map(s => `  ${s.code}: ${s.count}`).join('\n');
+    const codeBreakdown = formatCodeBreakdown(failedFiles);
     if (!opts.skipFailed) {
       console.error(
         `\nSync blocked: ${failedFiles.length} file(s) failed to parse:\n` +
@@ -554,10 +553,9 @@ export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<
     // --skip-failed: acknowledge the now-recorded set and proceed.
     const acked = acknowledgeSyncFailures();
     if (acked.count > 0) {
-      const ackedBreakdown = acked.summary.map(s => `  ${s.code}: ${s.count}`).join('\n');
       console.error(
         `  Acknowledged ${acked.count} failure(s) and advancing past them:\n` +
-        `${ackedBreakdown}`,
+        `${formatCodeBreakdown(acked.summary)}`,
       );
     }
   }
@@ -666,8 +664,7 @@ async function performFullSync(
   // the sync module owns the last_commit write. Respect the same gate.
   if (result.failures.length > 0) {
     recordSyncFailures(result.failures, headCommit);
-    const codeSummary = summarizeFailuresByCode(result.failures);
-    const codeBreakdown = codeSummary.map(s => `  ${s.code}: ${s.count}`).join('\n');
+    const codeBreakdown = formatCodeBreakdown(result.failures);
     if (!opts.skipFailed) {
       console.error(
         `\nFull sync blocked: ${result.failures.length} file(s) failed:\n` +
@@ -689,10 +686,9 @@ async function performFullSync(
     }
     const acked = acknowledgeSyncFailures();
     if (acked.count > 0) {
-      const ackedBreakdown = acked.summary.map(s => `  ${s.code}: ${s.count}`).join('\n');
       console.error(
         `  Acknowledged ${acked.count} failure(s) and advancing past them:\n` +
-        `${ackedBreakdown}`,
+        `${formatCodeBreakdown(acked.summary)}`,
       );
     }
   }

@@ -263,3 +263,170 @@ describe('recordSyncFailures — code field', () => {
     expect(entries[0].code).toBe('SLUG_MISMATCH');
   });
 });
+
+// classifyErrorCode disambiguates Postgres unique-constraint errors from
+// YAML duplicate-key errors. Pre-fix, every "duplicate.*key" string mapped
+// to YAML_DUPLICATE_KEY, which mislabels DB-layer failures during sync.
+describe('classifyErrorCode — DB vs YAML duplicate-key disambiguation', () => {
+  test('Postgres unique-constraint violation classifies as DB_DUPLICATE_KEY', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode(
+      'duplicate key value violates unique constraint "pages_slug_key"'
+    )).toBe('DB_DUPLICATE_KEY');
+  });
+
+  test('YAML duplicated mapping key still classifies as YAML_DUPLICATE_KEY', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('YAMLException: duplicated mapping key "title"'))
+      .toBe('YAML_DUPLICATE_KEY');
+  });
+
+  test('DB pattern is checked BEFORE YAML so DB errors are not mislabeled', async () => {
+    // Both patterns historically matched /duplicate.*key/i — order matters now.
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode(
+      'duplicate key value violates unique constraint on table "pages"'
+    )).toBe('DB_DUPLICATE_KEY');
+    expect(classifyErrorCode(
+      'duplicate key value violates unique constraint on table "pages"'
+    )).not.toBe('YAML_DUPLICATE_KEY');
+  });
+});
+
+// classifyErrorCode matches the canonical messages emitted by
+// collectValidationErrors() in src/core/markdown.ts. Pre-fix, the regexes
+// keyed off "missing open" / "missing close" / "empty frontmatter" — none
+// of which are produced upstream. Today these all classify correctly.
+describe('classifyErrorCode — canonical message coverage', () => {
+  test('MISSING_OPEN matches "File is empty or whitespace-only"', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode(
+      'File is empty or whitespace-only; expected frontmatter starting with ---'
+    )).toBe('MISSING_OPEN');
+  });
+
+  test('MISSING_OPEN matches "Frontmatter must start with ---"', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode(
+      'Frontmatter must start with --- on the first non-empty line'
+    )).toBe('MISSING_OPEN');
+  });
+
+  test('MISSING_CLOSE matches "No closing --- delimiter"', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('No closing --- delimiter found')).toBe('MISSING_CLOSE');
+  });
+
+  test('MISSING_CLOSE matches "Heading at line N found inside frontmatter"', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode(
+      'Heading at line 5 found inside frontmatter zone (closing --- comes after)'
+    )).toBe('MISSING_CLOSE');
+  });
+
+  test('EMPTY_FRONTMATTER matches "Frontmatter block is empty"', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('Frontmatter block is empty')).toBe('EMPTY_FRONTMATTER');
+  });
+
+  test('NULL_BYTES matches "Content contains null bytes"', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('Content contains null bytes (likely binary corruption)'))
+      .toBe('NULL_BYTES');
+  });
+
+  test('NESTED_QUOTES matches "Nested double quotes"', async () => {
+    const { classifyErrorCode } = await import('../src/core/sync.ts');
+    expect(classifyErrorCode('Nested double quotes in YAML value at line 3'))
+      .toBe('NESTED_QUOTES');
+  });
+});
+
+// acknowledgeSyncFailures backfills `code` on legacy entries that were
+// recorded before the code field existed (~/.gbrain/sync-failures.jsonl
+// from pre-PR brains). Without this branch, upgraded users see "UNKNOWN"
+// for every previously-recorded failure even when the message is parseable.
+describe('acknowledgeSyncFailures — backfill on legacy entries', () => {
+  test('backfills code on entries that predate the code field', async () => {
+    const { acknowledgeSyncFailures, loadSyncFailures, syncFailuresPath } =
+      await import('../src/core/sync.ts');
+
+    // Hand-write a legacy entry with no `code` field. Mimics a pre-PR
+    // ~/.gbrain/sync-failures.jsonl row that exists on real upgrades.
+    const { mkdirSync } = await import('fs');
+    const { dirname } = await import('path');
+    mkdirSync(dirname(syncFailuresPath()), { recursive: true });
+    writeFileSync(
+      syncFailuresPath(),
+      JSON.stringify({
+        path: 'a.md',
+        error: 'Frontmatter slug "x" does not match path-derived slug "y"',
+        commit: 'old',
+        ts: '2025-01-01T00:00:00Z',
+      }) + '\n',
+    );
+
+    const result = acknowledgeSyncFailures();
+    expect(result.count).toBe(1);
+    expect(result.summary).toEqual([{ code: 'SLUG_MISMATCH', count: 1 }]);
+
+    const after = loadSyncFailures();
+    expect(after).toHaveLength(1);
+    expect(after[0].code).toBe('SLUG_MISMATCH');
+    expect(after[0].acknowledged).toBe(true);
+  });
+
+  test('preserves existing code field; never reclassifies', async () => {
+    const { acknowledgeSyncFailures, loadSyncFailures, syncFailuresPath } =
+      await import('../src/core/sync.ts');
+
+    const { mkdirSync } = await import('fs');
+    const { dirname } = await import('path');
+    mkdirSync(dirname(syncFailuresPath()), { recursive: true });
+    // Pre-classified entry — should NOT be re-run through classifier.
+    writeFileSync(
+      syncFailuresPath(),
+      JSON.stringify({
+        path: 'a.md',
+        error: 'some message that would otherwise classify as UNKNOWN',
+        code: 'CUSTOM_CODE',
+        commit: 'x',
+        ts: '2025-01-01T00:00:00Z',
+      }) + '\n',
+    );
+
+    const result = acknowledgeSyncFailures();
+    expect(result.summary).toEqual([{ code: 'CUSTOM_CODE', count: 1 }]);
+    expect(loadSyncFailures()[0].code).toBe('CUSTOM_CODE');
+  });
+});
+
+// formatCodeBreakdown is the DRY helper used by both the failures-array
+// path (sync.ts blocked-by-failures + full-sync stderr) and the pre-summarized
+// AcknowledgeResult.summary path (--skip-failed ack message). One renderer,
+// two input shapes.
+describe('formatCodeBreakdown — dual input shape', () => {
+  test('renders raw failures by classifying internally', async () => {
+    const { formatCodeBreakdown } = await import('../src/core/sync.ts');
+    const out = formatCodeBreakdown([
+      { error: 'Frontmatter slug "a" does not match path-derived slug "b"' },
+      { error: 'Frontmatter slug "c" does not match path-derived slug "d"' },
+      { error: 'YAML parse failed: bad' },
+    ]);
+    expect(out).toBe('  SLUG_MISMATCH: 2\n  YAML_PARSE: 1');
+  });
+
+  test('renders pre-summarized {code, count} input directly', async () => {
+    const { formatCodeBreakdown } = await import('../src/core/sync.ts');
+    const out = formatCodeBreakdown([
+      { code: 'SLUG_MISMATCH', count: 5 },
+      { code: 'YAML_PARSE', count: 2 },
+    ]);
+    expect(out).toBe('  SLUG_MISMATCH: 5\n  YAML_PARSE: 2');
+  });
+
+  test('returns empty string for empty input', async () => {
+    const { formatCodeBreakdown } = await import('../src/core/sync.ts');
+    expect(formatCodeBreakdown([])).toBe('');
+  });
+});
