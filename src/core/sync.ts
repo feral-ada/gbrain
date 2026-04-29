@@ -325,14 +325,16 @@ export interface SyncFailure {
 export function classifyErrorCode(errorMsg: string): string {
   if (/slug.*does not match|SLUG_MISMATCH/i.test(errorMsg)) return 'SLUG_MISMATCH';
   if (/YAML parse|yaml.*parse|YAML_PARSE/i.test(errorMsg)) return 'YAML_PARSE';
-  if (/MISSING_OPEN|missing.*open/i.test(errorMsg)) return 'MISSING_OPEN';
-  if (/MISSING_CLOSE|missing.*close/i.test(errorMsg)) return 'MISSING_CLOSE';
+  if (/MISSING_OPEN|missing.*open|frontmatter.*must start|expected frontmatter starting/i.test(errorMsg)) return 'MISSING_OPEN';
+  if (/MISSING_CLOSE|missing.*close|no closing ---|inside frontmatter zone/i.test(errorMsg)) return 'MISSING_CLOSE';
   if (/NULL_BYTES|null.*byte/i.test(errorMsg)) return 'NULL_BYTES';
   if (/NESTED_QUOTES|nested.*quote/i.test(errorMsg)) return 'NESTED_QUOTES';
-  if (/EMPTY_FRONTMATTER|empty.*frontmatter/i.test(errorMsg)) return 'EMPTY_FRONTMATTER';
+  if (/EMPTY_FRONTMATTER|empty.*frontmatter|frontmatter block is empty/i.test(errorMsg)) return 'EMPTY_FRONTMATTER';
   if (/duplicate.*key/i.test(errorMsg)) return 'YAML_DUPLICATE_KEY';
   if (/statement.*timeout/i.test(errorMsg)) return 'STATEMENT_TIMEOUT';
   if (/invalid.*utf/i.test(errorMsg)) return 'INVALID_UTF8';
+  if (/file too large|content too large/i.test(errorMsg)) return 'FILE_TOO_LARGE';
+  if (/skipping symlink|symlink/i.test(errorMsg)) return 'SYMLINK_NOT_ALLOWED';
   return 'UNKNOWN';
 }
 
