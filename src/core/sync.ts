@@ -301,7 +301,7 @@ export function resolveSlugForPath(filePath: string, repoPrefix?: string): strin
 
 import { existsSync as _existsSync, readFileSync as _readFileSync, appendFileSync as _appendFileSync, mkdirSync as _mkdirSync } from 'fs';
 import { join as _joinPath } from 'path';
-import { homedir as _homedir } from 'os';
+import { gbrainPath as _gbrainPath } from './config.ts';
 import { createHash as _createHash } from 'crypto';
 
 export interface SyncFailure {
@@ -315,7 +315,7 @@ export interface SyncFailure {
 }
 
 function _failuresDir(): string {
-  return _joinPath(_homedir(), '.gbrain');
+  return _gbrainPath();
 }
 
 export function syncFailuresPath(): string {

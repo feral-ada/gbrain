@@ -25,10 +25,9 @@
  */
 
 import { appendFileSync, existsSync, readFileSync, mkdirSync, writeFileSync } from 'fs';
-import { homedir } from 'os';
-import { join, dirname } from 'path';
+import { dirname } from 'path';
 
-import { loadConfig, toEngineConfig } from '../core/config.ts';
+import { loadConfig, toEngineConfig, gbrainPath } from '../core/config.ts';
 import { createEngine } from '../core/engine-factory.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { BrainWriter } from '../core/output/writer.ts';
@@ -44,10 +43,10 @@ import { tweetCitation } from '../core/output/scaffold.ts';
 // Paths
 // ---------------------------------------------------------------------------
 
-const GBRAIN_DIR = join(homedir(), '.gbrain');
-const REVIEW_FILE = join(GBRAIN_DIR, 'integrity-review.md');
-const LOG_FILE = join(GBRAIN_DIR, 'integrity.log.jsonl');
-const PROGRESS_FILE = join(GBRAIN_DIR, 'integrity-progress.jsonl');
+// Lazy: GBRAIN_HOME may be set after module load.
+const getReviewFile = () => gbrainPath('integrity-review.md');
+const getLogFile = () => gbrainPath('integrity.log.jsonl');
+const getProgressFile = () => gbrainPath('integrity-progress.jsonl');
 
 // ---------------------------------------------------------------------------
 // Bare-tweet detection
@@ -157,9 +156,9 @@ interface ProgressEntry {
 }
 
 function loadProgress(): Set<string> {
-  if (!existsSync(PROGRESS_FILE)) return new Set();
+  if (!existsSync(getProgressFile())) return new Set();
   const seen = new Set<string>();
-  const content = readFileSync(PROGRESS_FILE, 'utf-8');
+  const content = readFileSync(getProgressFile(), 'utf-8');
   for (const line of content.split('\n')) {
     if (!line.trim()) continue;
     try {
@@ -173,12 +172,12 @@ function loadProgress(): Set<string> {
 }
 
 function appendProgress(entry: ProgressEntry): void {
-  ensureDir(PROGRESS_FILE);
-  appendFileSync(PROGRESS_FILE, JSON.stringify(entry) + '\n', 'utf-8');
+  ensureDir(getProgressFile());
+  appendFileSync(getProgressFile(), JSON.stringify(entry) + '\n', 'utf-8');
 }
 
 function clearProgress(): void {
-  if (existsSync(PROGRESS_FILE)) writeFileSync(PROGRESS_FILE, '', 'utf-8');
+  if (existsSync(getProgressFile())) writeFileSync(getProgressFile(), '', 'utf-8');
 }
 
 function ensureDir(path: string): void {
@@ -212,7 +211,7 @@ export async function runIntegrity(args: string[]): Promise<void> {
   }
   if (sub === 'reset-progress') {
     clearProgress();
-    console.log('Cleared progress log:', PROGRESS_FILE);
+    console.log('Cleared progress log:', getProgressFile());
     return;
   }
 
@@ -334,7 +333,7 @@ async function cmdAuto(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  ensureDir(GBRAIN_DIR);
+  ensureDir(gbrainPath());
 
   const engine = await connect();
   const registry = getDefaultRegistry();
@@ -473,9 +472,9 @@ async function cmdAuto(args: string[]): Promise<void> {
     console.log(`Review queue (≥${reviewLower} <${confidenceThreshold}): ${bucketReview}`);
     console.log(`Skipped (<${reviewLower}): ${bucketSkip}`);
     if (bucketErr > 0) console.log(`Resolver errors: ${bucketErr}`);
-    console.log(`\nReview queue: ${REVIEW_FILE}`);
-    console.log(`Skipped log:  ${LOG_FILE}`);
-    console.log(`Progress:     ${PROGRESS_FILE}`);
+    console.log(`\nReview queue: ${getReviewFile()}`);
+    console.log(`Skipped log:  ${getLogFile()}`);
+    console.log(`Progress:     ${getProgressFile()}`);
   } finally {
     await engine.disconnect();
   }
@@ -486,15 +485,15 @@ async function cmdAuto(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function cmdReview(): void {
-  if (!existsSync(REVIEW_FILE)) {
+  if (!existsSync(getReviewFile())) {
     console.log(`No review queue yet. Run: gbrain integrity auto --confidence 0.8`);
     return;
   }
-  const content = readFileSync(REVIEW_FILE, 'utf-8');
+  const content = readFileSync(getReviewFile(), 'utf-8');
   const count = (content.match(/^## /gm) ?? []).length;
-  console.log(`Review queue: ${REVIEW_FILE}`);
+  console.log(`Review queue: ${getReviewFile()}`);
   console.log(`Entries: ${count}`);
-  console.log(`\nOpen with: $EDITOR ${REVIEW_FILE}`);
+  console.log(`\nOpen with: $EDITOR ${getReviewFile()}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -575,7 +574,7 @@ interface ReviewArgs {
 }
 
 function appendReview(args: ReviewArgs): void {
-  ensureDir(REVIEW_FILE);
+  ensureDir(getReviewFile());
   const { slug, hit, result, handle } = args;
   const block = [
     `## ${slug}:${hit.line}  (confidence ${result.confidence.toFixed(2)})`,
@@ -589,12 +588,12 @@ function appendReview(args: ReviewArgs): void {
     '---',
     '',
   ].join('\n');
-  appendFileSync(REVIEW_FILE, block, 'utf-8');
+  appendFileSync(getReviewFile(), block, 'utf-8');
 }
 
 interface SkipArgs { slug: string; hit: BareTweetHit; reason: string }
 function logSkip(args: SkipArgs): void {
-  ensureDir(LOG_FILE);
+  ensureDir(getLogFile());
   const entry = {
     timestamp: new Date().toISOString(),
     slug: args.slug,
@@ -603,7 +602,7 @@ function logSkip(args: SkipArgs): void {
     raw: args.hit.rawLine.slice(0, 200),
     reason: args.reason,
   };
-  appendFileSync(LOG_FILE, JSON.stringify(entry) + '\n', 'utf-8');
+  appendFileSync(getLogFile(), JSON.stringify(entry) + '\n', 'utf-8');
 }
 
 // ---------------------------------------------------------------------------
