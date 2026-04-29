@@ -341,7 +341,7 @@ async function runGenerate(args: string[]): Promise<void> {
   }
 
   const { inferFrontmatter, serializeFrontmatter } = await import('../core/frontmatter-inference.ts');
-  const { resolve, relative, join } = await import('path');
+  const { resolve, relative, join, basename } = await import('path');
   const { readFileSync, writeFileSync, copyFileSync, statSync, readdirSync, lstatSync } = await import('fs');
 
   const rootPath = resolve(targetPath);
