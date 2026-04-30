@@ -360,6 +360,11 @@ export function classifyErrorCode(errorMsg: string): string {
 
   // Generic fallbacks.
   if (/invalid UTF-?8|INVALID_UTF8/i.test(errorMsg)) return 'INVALID_UTF8';
+
+  // v0.22.12 additions: covers the four real production sites in src/core/import-file.ts
+  // (lines 199, 347, 352, 401) that previously bucketed to UNKNOWN.
+  if (/file too large|content too large|FILE_TOO_LARGE/i.test(errorMsg)) return 'FILE_TOO_LARGE';
+  if (/skipping symlink|symlink|SYMLINK_NOT_ALLOWED/i.test(errorMsg)) return 'SYMLINK_NOT_ALLOWED';
   return 'UNKNOWN';
 }
 

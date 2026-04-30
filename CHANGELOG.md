@@ -41,6 +41,393 @@ The friction signal comes from a new `gbrain friction {log,render,list,summary}`
 - 113 new unit tests covering: writer atomicity (concurrent appends), renderer redaction, agent registry resolution + selection precedence, multi-byte UTF-8 chunk-boundary safety, PIPE buffer drain under 256KB+ bursts, scenario load + validation, progress event parsing, SQL splitter (single-quote + line-comment handling), and full claw-test E2E (`test/e2e/claw-test.test.ts` builds a tiny `bun run src/cli.ts` shim and runs --scenario fresh-install end-to-end + a deliberate-break test that proves the friction signal fires).
 - `test/gbrain-home-isolation.test.ts` is the regression gate: spawns `gbrain init --pglite` and `gbrain import --no-embed` with `GBRAIN_HOME=<tmp>`, asserts no writes outside `<tmp>/.gbrain` (covers `import.ts:54`, `sync.ts:317`, `upgrade.ts:117`, audit dirs).
 
+## [0.22.15] - 2026-04-29
+
+## **Throw bare markdown into your brain and it becomes properly typed knowledge. No YAML ceremony.**
+
+A real 81K-page brain has 9,655 files with no frontmatter. They imported fine, but every one of them landed in the DB as `type: concept`, `title: <slugified-filename>`, no date, no source, no tags. Search ranking suffered. Type-filtered queries missed them. Entity resolution fell over.
+
+This release adds path-aware frontmatter inference. `gbrain sync` now synthesizes type, date, source, and tags from the filesystem path and first heading the moment a bare-frontmatter file imports. No LLM call, fully deterministic, file on disk untouched. An Apple Note at `Apple Notes/2010-04-13 founders mtg.md` lands as `type: apple-note, title: founders mtg, date: 2010-04-13, source: apple-notes` instead of `type: concept, title: 2010 04 13 Founders Mtg`.
+
+If you want the inference written back to git, the new `gbrain frontmatter generate <path> --fix` walks a brain dir, infers frontmatter for every file that lacks it, and writes back with `.bak` safety backups. Dry-run by default.
+
+### The 9,655 numbers that matter
+
+Measured against my actual brain (gbrain v0.22.8 + the new inference path).
+
+| Behavior | Before v0.22.15 | After v0.22.15 |
+|---|---|---|
+| Files importing as `type: concept` (no frontmatter) | 9,655 | 0 |
+| Apple Notes typed correctly (`apple-note`) | 0 | 5,861 |
+| Calendar indexes typed correctly (`calendar-index`) | 0 | 3,201 |
+| Therapy sessions typed + dated | 0 | 60 |
+| Essay drafts typed + dated | 0 | 33 |
+| LLM cost for the full reclassification | n/a | $0 |
+
+The agent doing type-filtered queries on your brain (`type: person`, `type: meeting`, `type: essay`) now actually finds those pages instead of treating everything as `concept`.
+
+### What this means for you
+
+If you've been resisting frontmatter ceremony — same. Throw bare markdown into your brain and inference handles it. The rules table in `src/core/frontmatter-inference.ts` covers the obvious directories (`people/`, `companies/`, `daily/calendar/`, `writing/`, `meetings/`, `personal/`, etc.) plus a generic catch-all. Adding a new convention is one line in `DIRECTORY_RULES`.
+
+## To take advantage of v0.22.15
+
+`gbrain upgrade` should do this automatically. Then:
+
+1. **Run a dry-run preview:**
+   ```bash
+   gbrain frontmatter generate ~/brain
+   ```
+   You'll see how many files would get inferred frontmatter and the breakdown by type.
+2. **Optionally write back to git:**
+   ```bash
+   gbrain frontmatter generate ~/brain --fix
+   ```
+   Each modified file gets a `.bak` backup before rewrite.
+3. **Re-sync to pick up the new metadata:**
+   ```bash
+   gbrain sync ~/brain
+   ```
+   Inferred frontmatter is folded into `content_hash`, so previously-bare files re-import once with proper types and re-embed. Subsequent syncs are idempotent.
+4. **If anything looks off,** please file an issue: https://github.com/garrytan/gbrain/issues with the path of the misclassified file and the rule that matched.
+
+### Itemized changes
+
+#### Features
+- `src/core/frontmatter-inference.ts` (new module) — Path-aware frontmatter synthesis. `DIRECTORY_RULES` table maps path prefixes to type/date/title/source/tags. First-match-wins. Date extraction from filenames (`YYYY-MM-DD` prefix or anywhere). Title extraction with date-prefix stripping and first-`#`-heading fallback (20-line window). YAML-safe serialization with quoting for special characters.
+- `src/core/import-file.ts` — `importFromFile()` runs inference inline before `parseMarkdown()` when `opts.inferFrontmatter !== false` (default on). The synthesized frontmatter folds into the in-memory content for parsing, chunking, embedding, and content-hash computation. The file on disk is not modified.
+- `src/commands/frontmatter.ts` — New `gbrain frontmatter generate <path> [--fix] [--dry-run] [--json]` subcommand. Walks a directory (skips `.git`, `node_modules`, `.obsidian`, symlinks), runs inference on every `.md` file without frontmatter, optionally writes back with `.bak` backups. Auto-detects brain root by walking up for `.git`. Shows per-type breakdown and first-10 examples.
+
+#### Fixes
+- `src/commands/frontmatter.ts:344` — `runGenerate` dynamic path import now includes `basename`. Single-file invocation (`gbrain frontmatter generate <file>`) previously crashed with `ReferenceError: basename is not defined` on the relative-path-empty fallback at line 437.
+
+#### Tests
+- `test/frontmatter-inference.test.ts` (new, 35 cases) — date extraction (5), title extraction from filenames (5) and headings (4 incl. 20-line boundary), inference for every directory rule (13 incl. Apple Notes subfolder tagging), serialization with YAML-safe quoting (4), `applyInference` integration (2), rule ordering and catch-all coverage (2).
+
+## [0.22.14] - 2026-04-29
+
+**Bare `gbrain jobs work` now self-monitors and fail-stops cleanly when its database dies or the queue stalls.**
+**The wedged-worker class of bug — process alive, jobs piling up, your `pgrep` check happily green — is gone.**
+
+A production brain (54K pages, Supabase Postgres, 3-concurrency worker under a cron-based PM)
+hit it last week: worker process state=Sl at 13:15 UTC, stopped claiming jobs, 21 jobs stacked
+in `waiting` over two hours, 5 autopilot-cycles dead-lettered at the 600s timeout, then 150
+zombie processes accumulated over the container's 31-day life. The PM's `pgrep` saw a live
+PID and reported green the entire time.
+
+Pre-v0.22.14, bare `gbrain jobs work` had **zero** health monitoring. The supervisor (`gbrain
+jobs supervisor`) had the right protections — DB liveness probes, stall detection, RSS
+watchdog, reconnect on transient PgBouncer blips — but the supervisor wraps `jobs work` as a
+child, and many production deployments run bare `jobs work` directly under systemd, Docker,
+launchd, cron watchdog, or supervisord. That mode got nothing.
+
+This release moves health monitoring into the bare worker itself, gated by `GBRAIN_SUPERVISED=1`
+so it doesn't double up under the supervisor. When the worker detects it's wedged, it emits an
+`'unhealthy'` event with a structured reason, and the CLI calls `process.exit(1)` so the external
+PM restarts it cleanly. **This is fail-stop:** the worker exits and stays dead until your PM
+brings it back. If you run bare `jobs work` without a restart loop, you need one now.
+
+### The numbers that matter
+
+Detection signatures the new health check catches, measured against the production incident
+above (and the 30-day deployment running under the band-aid bash watchdog Garry deployed before
+this fix):
+
+| Failure mode | Before v0.22.14 | After v0.22.14 |
+|---|---|---|
+| DB connection death (Supabase/PgBouncer drop) | undetected; worker idles forever | 3 consecutive `SELECT 1` failures (≤3min) → `'unhealthy'`+exit |
+| Hung DB probe (network partition) | timer wedged forever, monitoring silently disabled | 10s probe timeout per tick → counted as failure → exit at strike 3 |
+| Worker stall (event loop alive, claim returns null) | undetected; jobs pile up in `waiting` | 5min warn, 10min `'unhealthy'`+exit (measured from last completion) |
+| Memory leak (RSS climbing past 2GB) | undetected on bare workers | watchdog default 2048 MB triggers `gracefulShutdown('watchdog')` |
+| Worker stalled but waiting jobs are unhandled type | ❌ false-positive exit (restart loop) | filter by registered handler names, no exit |
+
+Operationally: from the band-aid bash watchdog Garry deployed before this fix, fresh worker
+restart cleared 21 waiting → 0 in 2 minutes, then ran stable for 30+ min with 130 MB RSS,
+autopilot-cycles completing in 0.2–0.6s instead of timing out at 600s.
+
+### What this means for operators
+
+Add a restart policy to your bare-worker invocation BEFORE upgrading. The new behavior is
+fail-stop, not self-healing — without a restart loop, your worker will exit on the first DB
+blip and stay dead. systemd `Restart=always`, Docker `restart: always`, launchd `KeepAlive`,
+cron watchdog, supervisord `autorestart=true`. The migration walks every PM. If you're using
+`gbrain jobs supervisor`, you're already protected — the supervisor handles spawn-on-crash
+itself.
+
+The default `--max-rss` for bare workers also bumped from 0 (off) to 2048 MB. If you ran bare
+workers with intentionally large embed/import jobs, raise the limit (`--max-rss 4096`) or opt
+out (`--max-rss 0`). The migration includes per-PM unit-file edits.
+
+## To take advantage of v0.22.14
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about
+a bare worker exiting with watchdog signatures:
+
+1. **Confirm your bare-worker invocations have a restart policy:**
+   ```bash
+   # systemd
+   grep -E '^Restart=' ~/.config/systemd/user/gbrain-worker.service /etc/systemd/system/gbrain-worker.service 2>/dev/null
+   # crontab
+   crontab -l | grep "gbrain jobs work"
+   # launchctl
+   plutil -p ~/Library/LaunchAgents/com.user.gbrain-worker.plist | grep -A1 KeepAlive
+   ```
+2. **Decide on RSS posture:**
+   - Default 2048 MB matches supervisor behavior. Most bare workers fit.
+   - Embed/import jobs > 2GB? Pass `--max-rss 4096` (or higher).
+   - Intentionally unbounded? Pass `--max-rss 0`.
+3. **Walk the migration:** `skills/migrations/v0.22.14.md` has the full per-PM table and a
+   verification block.
+4. **Verify:**
+   ```bash
+   gbrain jobs stats
+   gbrain doctor --json | jq '.checks[] | select(.name == "queue_health")'
+   ```
+   Worker startup line should now read:
+   `Minion worker started (queue: default, concurrency: 3, watchdog: 2048MB, health-check: 60s)`
+   Under supervisor: the `health-check: Ns` segment is absent (supervisor handles it).
+5. **If anything fails or numbers look wrong**, file an issue at
+   https://github.com/garrytan/gbrain/issues with `gbrain doctor` output and the contents of
+   `~/.gbrain/upgrade-errors.jsonl` if it exists.
+
+### Itemized changes
+
+#### Added
+- `MinionWorkerOpts.{healthCheckInterval, stallWarnAfterMs, stallExitAfterMs, dbFailExitAfter, dbProbeTimeoutMs}` — five new tuning knobs. Defaults: 60s probe interval, 5min warn / 10min exit, 3 DB strikes, 10s per-probe timeout.
+- `MinionWorker` now extends `EventEmitter`. Emits `'unhealthy'` with `{ reason: 'db_dead', consecutiveFailures, message } | { reason: 'stalled', waitingCount, idleMinutes }`. CLI subscribes; direct API consumers without a listener inherit a fail-stop fallback that calls `process.exit(1)` to preserve pre-refactor semantics.
+- `gbrain jobs work --health-interval MS` — tune the self-health-check cadence (0 disables; rejects NaN/negative/sub-1000ms typos).
+- `gbrain jobs supervisor --health-interval MS` — same flag, same validation, same `0 = disable` contract on the supervisor's own probe.
+- `GBRAIN_SUPERVISED=1` env var on the supervisor's spawned worker child (skips the child's self-health timer to avoid double-monitoring).
+- `gbrain doctor` `queue_health` subcheck reports RSS-watchdog kills in the last 24h via exact match on `error_text = 'aborted: watchdog'` scoped to `status IN ('dead','failed')`.
+- `skills/migrations/v0.22.14.md` — full migration walkthrough with per-PM restart-policy preflight, RSS-posture decision tree, and per-system unit-file edits.
+
+#### Changed
+- **Default `--max-rss` for `gbrain jobs work`: 0 → 2048 MB.** Matches supervisor default. Catches memory-leak stalls that previously went undetected on bare workers. Opt out with `--max-rss 0`.
+- **Bare-worker behavior is now fail-stop** when the DB is unreachable or the queue stalls. Pre-v0.22.14 the worker idled silently. Now it exits and relies on the external PM (systemd, Docker, launchd, cron, supervisord) to restart cleanly.
+- Stall query at `worker.ts` filters by registered handler names (`AND name = ANY($2::text[])`) so workers don't false-positive when waiting jobs of unhandled names accumulate.
+- Stall exit threshold measured from `lastCompletionTime` (not from when the warning fired), so 5min warn / 10min exit means total idle of 10 min — not 15 min.
+- DB liveness probe wrapped in `Promise.race` against a 10s timeout so a hung `executeRaw` cannot wedge the recursive `setTimeout` chain forever.
+- `setInterval` → recursive `setTimeout` with a `running` flag throughout. Eliminates timer-callback overlap on slow probes.
+- `parseMaxRssFlag` returns `number | undefined` (was `number`) so callers distinguish absent from explicit-disable.
+- `process.env.GBRAIN_SUPERVISED` check tightened from `!!env.X` to `=== '1'` (precise contract; no fuzzy matching on `'0'` or `'false'`).
+- `MinionWorker` constructor throws when `stallExitAfterMs <= stallWarnAfterMs` so misconfigurations fail loudly at startup.
+
+#### Fixed
+- **Wedged-worker false-positive on heterogeneous queues** — workers registering only some handlers no longer interpret waiting jobs of other names as a stall. Repeated `process.exit(1)` → restart loop is gone.
+- **Hung DB probe wedge** — pre-fix, a hung `executeRaw('SELECT 1')` kept the recursive `setTimeout` from rescheduling, silently disabling the entire health monitor. Post-fix, the probe times out and counts as a failure.
+- **`--health-interval 0` no longer DB-hammers the supervisor.** Pre-fix, the documented "0 disables" contract was a lie — `setInterval(cb, 0)` schedules a tight loop. Now gated behind `> 0`.
+- **Inline `jobs submit --follow` and `jobs smoke` no longer kill the user's CLI session** on a DB blip. Both now pass `healthCheckInterval: 0` so the no-listener fallback can't trip on one-shot runs.
+- Doctor's RSS-watchdog hint matches the actual error_text signature (`'aborted: watchdog'`) instead of the wrong `'memory limit'` literal that never matched.
+
+#### For contributors
+- `MinionWorker extends EventEmitter` — if you import the class directly, the `on('unhealthy', ...)` event is now part of the public surface. The `UnhealthyReason` discriminated union is exported from `src/core/minions/worker.ts`.
+- New regression-test infrastructure in `test/minions.test.ts`: `makeProbeEngine(overrides)` is a Proxy-based engine wrapper that intercepts `SELECT 1` and the stall `count(*)` query while passing every other call through to the real PGLite engine. Useful for any future test that needs to inject DB liveness or stall semantics without mocking the entire engine surface.
+
+### Adjacent (separate PR, v0.22.15)
+
+PR #503 catches the *symptom* of one specific failure mode. The cause-side fix — `runPhaseEmbed → embed.ts → embedBatch` not honoring `signal.aborted` between OpenAI batch calls — ships in v0.22.15 (highest-priority TODO; daily wedge driver). Plumbing is documented in `TODOS.md`.
+
+## [0.22.13] - 2026-04-28
+
+**Sync got faster, and the bookmark stopped lying.**
+**Parallel imports, a real writer lock, and a head-drift gate that catches the worst race.**
+
+The headline is `gbrain sync --workers N`: per-worker Postgres engines with an atomic queue index, same pattern as `gbrain import --workers N`. On a 7,000-page brain that used to take 25+ minutes, the import phase now runs across 4 workers by default. The reproducible benchmark in `test/e2e/sync-parallel.test.ts` shows `parallel(4)` finishing 1.3× faster than serial on a 120-file fixture against local Postgres (`serial=289ms parallel(4)=221ms`). The speedup grows on larger brains and slower-roundtrip databases (Supabase, remote PgBouncer) because the worker setup cost amortizes over more files. But the bigger story is that the sync writer is finally exclusive across processes, and the `last_commit` bookmark refuses to advance when git HEAD has drifted out from under us. The silent-skip-then-advance pathology has survived every prior sync hardening pass. It is dead now.
+
+### What you can do now
+
+- `gbrain sync --workers 4` (alias `--concurrency 4`) parallelizes the import phase. Each worker holds 2 connections, so total Postgres connections during the parallel phase is `workers * 2` plus your caller's pool. At the default of 4 workers and a 10-connection caller pool, that's up to 18 connections, well under PgBouncer's `max_client_conn` default of 100 but worth knowing on tight Supabase tiers.
+- **Auto-concurrency:** if you don't pass `--workers`, sync uses 4 workers when the diff exceeds 100 files. Smaller diffs stay serial. Explicit `--workers` always wins (even on a 30-file diff). PGLite forces serial regardless, since it's a single-connection engine.
+- **Full sync** routes through the same path. First syncs on large brains parallelize automatically.
+- **Minion `sync` jobs** also use the new `autoConcurrency()` policy. Behavior is now consistent between CLI sync, the Minion handler, and the autopilot cycle's sync phase. (`noEmbed` defaults to `true` in the jobs handler. Submit `gbrain embed --stale` as a separate job when needed, or rely on the autopilot cycle's embed phase.)
+- **`--workers` validation is loud now.** `--workers 0`, `--workers -3`, `--workers foo`, `--workers 1.5` all exit with an error message. The prior behavior silently fell through to auto-concurrency (4 workers), the opposite of what you typed.
+
+### Correctness fixes you didn't have to ask for
+
+- **Cross-process writer lock.** Two `gbrain sync` calls (manual + autopilot, two terminals, two Conductor workspaces) used to read the same `last_commit`, both write it, and let the last writer win. The new `gbrain-sync` row in `gbrain_cycle_locks` serializes the writer window. Same-process reentrance from the autopilot cycle handler was already covered by the broader `gbrain-cycle` lock; sync's lock is narrower and runs underneath it.
+- **Head-drift gate.** If `git checkout` or `git pull` runs in your worktree mid-sync (Conductor sibling workspace, ad-hoc terminal), the captured `headCommit` no longer matches HEAD when sync finishes. `last_commit` no longer advances in that case. The next sync re-walks the diff against the new HEAD instead of silently moving the bookmark past unimported work.
+- **Vanished files now block bookmark advance.** A file the diff said exists at `headCommit` but is gone from disk used to register as a benign skip. It now goes into `failedFiles` and gates `last_commit` the same way a parse failure does.
+- **Per-source bookmark for Minion `sync` jobs.** The job handler now resolves `sourceId` from the repo path (mirrors the autopilot cycle's `cycle.ts` fix from PR #475). On multi-source brains, this prevents the 30-min full-reimport-every-cycle behavior caused by reading the global `config.sync.last_commit` anchor when the per-source row would have been correct.
+- **Worker connection cleanup.** Worker engines now disconnect inside `try/finally`, even on partial connect failure or mid-import error. The prior `Promise.all(...disconnect)` ran outside any try/finally, so panic-path leaks never released the 8 worker connections.
+- **Engine detection unified.** Both PGLite-detection sites in sync.ts now use `engine.kind === 'pglite'` (the discriminator added in v0.13.1). The `engine.constructor.name === 'PGLiteEngine'` sniff is gone, since it broke under bundling and was inconsistent with the other site's `config.engine` string check.
+
+### What this means for you
+
+If you run autopilot on a 7,000-page Postgres brain, your sync cycle gets faster on day one with no flags. If you have ever felt the bookmark "skip past" work that didn't import, you'll stop seeing it. If you have multiple Conductor workspaces poking the same brain, you'll either wait politely on the writer lock or get a clear "another sync is in progress" error. None of this requires a config change.
+
+## To take advantage of v0.22.13
+
+`gbrain upgrade` should do this automatically. If you want to use the new flags right now:
+
+1. **For a one-off speed win on a large brain:**
+   ```bash
+   gbrain sync --workers 4
+   ```
+   Or for incremental syncs that touch >100 files, just run `gbrain sync`. Auto-concurrency fires.
+
+2. **For your autopilot cycle:** no action. The Minion `sync` handler picks up the new auto-concurrency policy automatically.
+
+3. **Verify the writer lock is working:**
+   ```bash
+   gbrain sync &
+   gbrain sync   # second call will say "Another sync is in progress" or wait
+   ```
+
+4. **If sync ever errors with "Another sync is in progress" and stays stuck:** the lock is in `gbrain_cycle_locks` with id `gbrain-sync` and a 30-minute TTL. If a worker crashed without releasing, the next acquirer takes over once the TTL expires. To unstick faster:
+   ```sql
+   DELETE FROM gbrain_cycle_locks WHERE id = 'gbrain-sync';
+   ```
+
+5. **If anything looks wrong,** file an issue: https://github.com/garrytan/gbrain/issues with output of `gbrain doctor` and the contents of `~/.gbrain/upgrade-errors.jsonl` if it exists.
+
+### Itemized changes
+
+- `src/commands/sync.ts`: `performSync` now wraps body in a `gbrain-sync` DB lock; `--workers` honored regardless of file count when explicit; head-drift gate after import phase; engine.kind detection; try/finally around worker engines; banner moved to stderr.
+- `src/commands/import.ts`: `engine.kind === 'pglite'` discriminator; try/finally around worker engines; shared `parseWorkers()` for `--workers` validation.
+- `src/commands/jobs.ts`: sync handler resolves `sourceId` via `sources.local_path` lookup; concurrency routed through `autoConcurrency()`; `noEmbed: true` default documented.
+- `src/core/sync-concurrency.ts` (new): `autoConcurrency()` + `parseWorkers()` + constants. One source of truth for the concurrency policy that previously lived in three call sites.
+- `src/core/db-lock.ts` (new): generic `tryAcquireDbLock(engine, lockId)` over the existing `gbrain_cycle_locks` table. Reused by performSync. cycle.ts continues to use its own ID `gbrain-cycle` so the two locks nest cleanly.
+- `test/sync-concurrency.test.ts` (new): 17 cases covering autoConcurrency thresholds, shouldRunParallel gates, parseWorkers validation.
+- `test/sync-parallel.test.ts` (new): PGLite-routed coverage of the bookmark gate under concurrency request, the head-drift gate, the writer-lock contract, and PGLite-stays-serial.
+- `test/e2e/sync-parallel.test.ts` (new): DATABASE_URL-gated Postgres E2E. 60-file happy path with `pg_stat_activity` leak probe, plus a 120-file serial-vs-parallel benchmark that prints `SYNC_PARALLEL_BENCH ...` for CHANGELOG quoting.
+
+### For contributors
+
+- `BrainEngine.kind` is now the canonical PGLite/Postgres discriminator. Avoid `engine.constructor.name === '...'` (breaks under bundling) and `config.engine === '...'` (inconsistent with the engine actually in use).
+- The `gbrain_cycle_locks` table is now multi-purpose. The id column distinguishes lock scopes: `gbrain-cycle` for the cycle, `gbrain-sync` for the sync writer. Future locks should pick distinct ids and reuse `tryAcquireDbLock`.
+- `parseWorkers()` is the canonical CLI flag parser for `--workers`. Use it instead of inline `parseInt`.
+
+## [0.22.12] - 2026-04-29
+
+**`sync --skip-failed` now classifies file-size and symlink rejections instead of bucketing them as UNKNOWN.**
+**Plus a full end-to-end test for the failure loop.**
+
+v0.22.9 shipped the headline classifier work: code-grouped breakdowns at sync time,
+DB-vs-YAML disambiguation, doctor surfaces both unacked and historical entries with
+`[CODE=N]` lines. v0.22.12 closes the last two coverage gaps that v0.22.9 left on
+the table:
+
+- **FILE_TOO_LARGE** now covers the three real production sites in
+  `src/core/import-file.ts:199, 352, 401` ("Content too large", "File too large",
+  "Code file too large"). On v0.22.9 these all bucketed as UNKNOWN — the same
+  silent-systemic-failure pattern that motivated the original issue.
+- **SYMLINK_NOT_ALLOWED** covers `src/core/import-file.ts:347` ("Skipping symlink").
+  Security-relevant rejection that operators should see.
+- **End-to-end failure-loop test** in `test/e2e/sync.test.ts` exercises the full
+  chain: broken file → sync blocks with grouped breakdown → `--skip-failed`
+  advances bookmark with grouped acknowledgement → second broken file → second
+  cycle. PostgreSQL-backed; verifies bookmark gating, JSONL state, dedup, and
+  summary aggregation. v0.22.9's coverage was unit-tests-only.
+
+Twelve total error codes ship in the classifier:
+`SLUG_MISMATCH`, `YAML_PARSE`, `YAML_DUPLICATE_KEY`, `DB_DUPLICATE_KEY`,
+`MISSING_OPEN`, `MISSING_CLOSE`, `NESTED_QUOTES`, `EMPTY_FRONTMATTER`,
+`NULL_BYTES`, `INVALID_UTF8`, `STATEMENT_TIMEOUT`, `FILE_TOO_LARGE`,
+`SYMLINK_NOT_ALLOWED`. Anything the regex set doesn't recognize falls through
+as `UNKNOWN`.
+
+### What this means for you
+
+If your brain rejects oversized files or symlinks, you now see those rejections
+in the doctor breakdown and at sync time grouped by code, instead of as
+`UNKNOWN`. Run `gbrain upgrade`. No manual action required.
+
+### Itemized changes
+
+#### Added
+- `FILE_TOO_LARGE` classifier code covering `src/core/import-file.ts:199, 352, 401`.
+- `SYMLINK_NOT_ALLOWED` classifier code covering `src/core/import-file.ts:347`.
+- Two new unit tests in `test/sync-failures.test.ts` pinning the new codes against
+  literal production message strings (`File too large (N bytes)`, `Skipping symlink: ...`).
+- `test/e2e/sync.test.ts` — new failure-loop test exercising broken-file → block →
+  `--skip-failed` → second cycle. Hermetic on developer machines (saves+restores
+  the user's real `~/.gbrain/sync-failures.jsonl`).
+
+## To take advantage of v0.22.12
+
+No manual action required. Run `gbrain upgrade`. The new `FILE_TOO_LARGE` and
+`SYMLINK_NOT_ALLOWED` classifier codes apply on the next `gbrain sync`.
+
+## [0.22.11] - 2026-04-27
+
+**Storage tiering, finally working. Brains scaling past 100K files stop bloating git.**
+
+The original storage-tiering branch shipped two silent bugs (gray-matter on YAML returned empty data; `manageGitignore` was defined and never invoked) so the feature was a no-op for every user who tried it. v0.22.11 rewrites the broken bits, hardens the surface, and adds proper test coverage. If you have a brain repo north of 100K files where bulk machine-generated content (tweets, articles, transcripts) is the size driver, this is the release that pulls it out of git without losing any data.
+
+Configure tiering in `gbrain.yml` at the brain repo root:
+
+```yaml
+storage:
+  db_tracked:
+    - people/
+    - companies/
+    - deals/
+  db_only:
+    - media/x/
+    - media/articles/
+    - meetings/transcripts/
+```
+
+`gbrain sync` then auto-manages your `.gitignore` for `db_only` directories so bulk content stops landing in commits. `gbrain export --restore-only` repopulates missing `db_only` files from the database (container restart, fresh clone, accidental rm). `gbrain storage status` shows the breakdown — counts, disk usage, missing files.
+
+### The numbers that matter
+
+200K-page brain, half tweets and articles. Before v0.22.11:
+
+| Metric | Before | After | Δ |
+|--------|--------|-------|---|
+| `gbrain.yml` actually loads | no (silent null) | yes | feature works |
+| `.gitignore` auto-manages | no (function never called) | yes | docs match reality |
+| `--restore-only` without `--repo` | silent full export | hard error | no data-loss footgun |
+| `media/xerox` matched against `media/x` | yes (collision) | no | path-segment matching |
+| Per-page disk syscalls during status | ~400K (existsSync + statSync) | ~one per dir + one stat per .md | single-walk scan |
+| Validation surfaces overlap | warning only | throws StorageConfigError | semantic error caught |
+
+### What this means for your brain
+
+If you've been reading the storage-tiering docs and waiting for the feature to actually do something: it does now. If you're already over 50K files: configure `gbrain.yml`, run `gbrain sync`, watch `.gitignore` update itself, watch your next clone get faster.
+
+## To take advantage of v0.22.11
+
+1. Add a `storage:` section to `gbrain.yml` at your brain repo root with `db_tracked` and `db_only` arrays. The directory paths must end with `/` (the validator auto-normalizes if you forget, with a one-time info note).
+2. Run `gbrain sync`. It updates `.gitignore` automatically on success.
+3. Run `gbrain storage status` to see the tier breakdown and any missing `db_only` files.
+4. If files are missing on disk (e.g., after a container restart): `gbrain export --restore-only --repo /path/to/brain`.
+5. If you previously had `git_tracked` / `supabase_only` keys: they still load, with a once-per-process deprecation warning. Rename to `db_tracked` / `db_only` at your convenience.
+6. On PGLite: tiering has limited effect (the "DB" is your local file). The `.gitignore` housekeeping still helps. A one-time soft-warn explains.
+
+If anything looks off, file an issue at <https://github.com/garrytan/gbrain/issues> with `gbrain doctor` output and the contents of your `gbrain.yml`.
+
+### Itemized changes
+
+#### Critical fixes
+
+- **YAML parser swap**: replaced `gray-matter` with a dedicated YAML reader for the `gbrain.yml` shape. The original code called `matter()` on a delimiter-less file, which always returned `{data: {}}` — `loadStorageConfig` returned null on every install. The dedicated parser handles top-level `storage:` plus nested array-valued keys, with comment + blank-line tolerance. Once-per-process sanity warning when `gbrain.yml` exists but has no `storage:` section.
+- **`manageGitignore` actually runs now**: wired into `runSync` after every successful sync (skipped on dry-run, blocked-by-failures, and unhandled errors). Idempotent. Detects git submodule context (`.git` is a file, not a directory) and skips with an actionable warning. Honors `GBRAIN_NO_GITIGNORE=1` for shared-repo setups.
+- **No more silent `--restore-only` footgun**: `gbrain export --restore-only` without `--repo` now resolves through a typed `getDefaultSourcePath()` accessor (sources table → null → hard error). Never falls through to the current directory. Never silently re-exports your entire database into the wrong place.
+
+#### New + renamed surface
+
+- **Canonical key names**: `db_tracked` / `db_only` replace the vendor-baked `git_tracked` / `supabase_only`. The deprecated keys still load, with a once-per-process warning suggesting `gbrain doctor --fix` for an automated rename. Canonical wins when both shapes coexist.
+- **Engine-side `slugPrefix` filter**: `PageFilters.slugPrefix` lands on both engines as `WHERE slug LIKE prefix || '%'` with literal-escape of LIKE metacharacters. Uses the existing `(source_id, slug)` UNIQUE btree index for range scans. Powers `gbrain export --restore-only` per-tier queries and `gbrain export --slug-prefix`.
+- **Single-walk filesystem scan**: `src/core/disk-walk.ts` exposes `walkBrainRepo(repoPath)` that returns `Map<slug, {size, mtimeMs}>` from one recursive `readdirSync`. Replaces the per-page `existsSync + statSync` loop in `gbrain storage status` (~400K syscalls on a 200K-page brain → tens).
+- **Path-segment matching**: tier directory matcher requires trailing `/` and treats the slash as a path separator. `media/x/` does not match `media/xerox/foo`. Validator (`normalizeAndValidateStorageConfig`) auto-fixes missing trailing `/`, throws `StorageConfigError` on tier overlap.
+
+#### Architecture cleanup
+
+- `src/commands/storage.ts` split into pure data + JSON formatter + human formatter + thin dispatcher, matching the `orphans.ts` precedent. `getStorageStatus` is exported for `gbrain doctor` integration. ASCII-only output (no unicode box-drawing) for cross-platform terminal compatibility.
+- Distinct nominal types `PageCountsByTier` and `DiskUsageByTier` so accidental swaps between page counts and byte totals are compile-time errors.
+- PGLite soft-warn on storage tiering (D4): the feature is partial on PGLite (the "DB" is your local file), but `.gitignore` housekeeping still helps. Once-per-process warning explains and proceeds.
+
+#### Tests + CI guards
+
+- New unit tests across `test/storage-config.test.ts`, `test/storage-sync.test.ts`, `test/storage-status.test.ts`, `test/storage-export.test.ts`, `test/storage-pglite.test.ts`, `test/disk-walk.test.ts`. Plus extensions to `test/source-resolver.test.ts` and `test/pglite-engine.test.ts`. The single-line test that would have caught the original gray-matter P0 (write a real `gbrain.yml`, call `loadStorageConfig`, assert non-null) now exists.
+- New CI guard `scripts/check-trailing-newline.sh` (sibling to the existing jsonb-pattern + progress-to-stdout guards). Wired into `bun run test`. Fixed pre-existing missing newline in `docs/storage-tiering.md`.
+
+### For contributors
+
+- The eng-review path forward is documented in `~/.claude/plans/lets-take-a-look-ticklish-pizza.md` (15 numbered defects + D1-D8 abstraction calls). Every commit on this branch maps to one numbered step in the plan.
+
 ## [0.22.10] - 2026-04-30
 
 **`gbrain jobs submit autopilot-cycle --params '{"phases":["lint","backlinks"]}'` now actually runs only those phases.**
@@ -131,7 +518,7 @@ If `gbrain sync` blocks with parse failures, the breakdown tells you what to fix
 - DB-layer error patterns (`DB_DUPLICATE_KEY`, `STATEMENT_TIMEOUT`) check BEFORE YAML patterns in the classifier, so Postgres errors don't get YAML-labeled.
 - Frontmatter regex patterns rewritten to match canonical messages from `collectValidationErrors()` (`File is empty...`, `No closing --- delimiter found`, `Frontmatter block is empty`) instead of aspirational code-token strings (`missing.*open`) that never appeared in practice.
 
-Closes #500. Eng-review plan: `~/.claude/plans/then-codex-synchronous-toucan.md` (codex outside-voice agreed on all 7 findings).
+Closes #500.
 
 ## [0.22.8] - 2026-04-28
 
@@ -280,8 +667,6 @@ Then point Claude Desktop, claude.ai/code, or any MCP client at `http://your-tun
 6. **If `gbrain serve --http` exits with "Postgres engine required":** PGLite is local-only by design. Either keep using stdio (`gbrain serve`) for local agents, or migrate to Postgres (`gbrain migrate --to supabase`).
 
 If anything breaks: `gbrain doctor`, `~/.gbrain/upgrade-errors.jsonl` (if present), and please file an issue at https://github.com/garrytan/gbrain/issues with both.
-
-
 
 ## [0.22.6.1] - 2026-04-26
 
