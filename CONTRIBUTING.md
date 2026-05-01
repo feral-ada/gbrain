@@ -124,6 +124,40 @@ See `docs/ENGINES.md` for the full guide. In short:
 
 The SQLite engine is designed and ready for implementation. See `docs/SQLITE_ENGINE.md`.
 
+## Running real-world eval benchmarks (touching retrieval code)
+
+If your PR touches retrieval — search ranking, RRF fusion, embeddings,
+intent classification, query expansion, source boost, or the `query` /
+`search` op handlers — run `gbrain eval replay` against a snapshot of
+real traffic before merging.
+
+Quick loop:
+
+```bash
+gbrain eval export --since 7d > baseline.ndjson    # snapshot before your change
+# ... make your change ...
+gbrain eval replay --against baseline.ndjson       # diff retrieval, get Jaccard@k
+```
+
+Three numbers come back: mean Jaccard@k between captured and current slug
+sets, top-1 stability, and mean latency Δ. The replay tool flags the worst
+regressions so you can eyeball whether the change is hurting real queries.
+
+Trigger paths (rerun if your diff touches any of these):
+
+- `src/core/search/hybrid.ts`
+- `src/core/search/source-boost.ts`, `sql-ranking.ts`
+- `src/core/search/intent.ts`, `expansion.ts`, `dedup.ts`
+- `src/core/embedding.ts`
+- `src/core/operations.ts` (query / search handlers)
+- `src/core/postgres-engine.ts` / `pglite-engine.ts` (searchKeyword /
+  searchVector SQL)
+
+See [`docs/eval-bench.md`](./docs/eval-bench.md) for the full guide
+including CI integration, hand-crafted NDJSON corpora, and the cost
+considerations. The NDJSON wire format is documented in
+[`docs/eval-capture.md`](./docs/eval-capture.md).
+
 ## Welcome PRs
 
 - SQLite engine implementation

@@ -33,6 +33,10 @@ export async function runEvalCommand(engine: BrainEngine, args: string[]): Promi
     const { runEvalPrune } = await import('./eval-prune.ts');
     return runEvalPrune(engine, args.slice(1));
   }
+  if (sub === 'replay') {
+    const { runEvalReplay } = await import('./eval-replay.ts');
+    return runEvalReplay(engine, args.slice(1));
+  }
 
   const opts = parseArgs(args);
 

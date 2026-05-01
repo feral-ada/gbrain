@@ -68,6 +68,9 @@ Measured on this branch's diff against v0.21.0:
 - PII scrubber in `src/core/eval-capture-scrub.ts` (6 regex families, adversarial-input safe)
 - Cross-process audit via `eval_capture_failures` + `gbrain doctor` 24h breakdown
 - `gbrain eval export` (NDJSON, schema_version:1, EPIPE-safe) + `gbrain eval prune` (explicit retention)
+- `gbrain eval replay --against <ndjson>` — contributor-facing dev loop. Reads a captured snapshot, re-runs every `query` / `search` against the current brain, prints mean Jaccard@k between captured + current `retrieved_slugs`, top-1 stability rate, and latency Δ. JSON mode (`schema_version: 1`) for CI gating, top-regressions table for human eyeballs. Closes the gap between "data captured" and "data used to gate a PR."
+- `docs/eval-bench.md` — contributor guide that walks the 4-command loop (export → change → replay → diff), defines metrics (Jaccard@k, top-1 stability, latency Δ) with healthy ranges, lists the source paths that should trigger a re-run, and shows how to wire it into CI. Linked from CONTRIBUTING.md.
+- `CONTRIBUTING.md` adds a "Running real-world eval benchmarks (touching retrieval code)" section so PRs that change retrieval have an obvious replay path. Maintainer reviews can ask "did you run replay?" instead of writing a custom benchmark per PR.
 - `hybridSearch` adds `onMeta?: (m) => void` to opts (Cathedral II callers unaffected)
 - `BrainEngine` gains 5 methods (breaking-interface for custom engines, drives v0.25.0 minor bump)
 - `test/public-exports.test.ts` + `scripts/check-exports-count.sh` lock the 17-subpath public surface
