@@ -9,7 +9,7 @@ All notable changes to GBrain will be documented in this file.
 
 v0.20 (gbrain-evals extraction) and v0.21 (Cathedral II) gave gbrain its install surface back and turned code into a first-class graph. The remaining gap was data: `amara-life`, the fictional 418-item corpus over in gbrain-evals, is great for reproducibility but not for catching regressions against the queries your agents *actually* serve. v0.22 ships the substrate: every `query` and `search` call through MCP, CLI, or the subagent tool-bridge gets recorded into a new `eval_candidates` table. `gbrain eval export` streams the rows as NDJSON. Point gbrain-evals at the stream and you have BrainBench-Real on every release.
 
-Capture is on by default. PII is scrubbed at write time (emails, phones, SSN, Luhn-verified credit cards, JWTs, bearer tokens). Queries over 50KB get rejected. RLS matches the v0.18.1 / v0.21.0 posture ... new tables get enabled on Postgres, gated on BYPASSRLS so it never locks an operator out of their own data. `gbrain doctor` surfaces silent capture failures cross-process so if something stops working you see it in health checks, not three weeks later when the replay numbers look weird.
+Capture is **off by default**. Production users get a quiet brain — no surprise data accumulation, no privacy footgun. Contributors flip it on with one shell rc line: `export GBRAIN_CONTRIBUTOR_MODE=1`. From that shell forward, every query/search lands in `eval_candidates`. PII is scrubbed at write time (emails, phones, SSN, Luhn-verified credit cards, JWTs, bearer tokens). Queries over 50KB get rejected. RLS matches the v0.18.1 / v0.21.0 posture ... new tables get enabled on Postgres, gated on BYPASSRLS so it never locks an operator out of their own data. `gbrain doctor` surfaces silent capture failures cross-process so if something stops working you see it in health checks, not three weeks later when the replay numbers look weird.
 
 Cathedral II (v0.21.0) callers are unaffected. `hybridSearch` still returns `Promise<SearchResult[]>` ... meta arrives via an optional `onMeta` callback in `HybridSearchOpts`, used only by the op-layer capture wrapper to record what hybridSearch *actually* did (vector ran or fell back, expansion fired or didn't, post-auto-detect detail).
 
@@ -30,7 +30,9 @@ Measured on this branch's diff against v0.21.0:
 
 ### What this means for you
 
-**Brain operators (the 99%):** run `gbrain upgrade`. Capture turns on. Run agents as usual. After a week, `gbrain eval export --since 7d > real.ndjson` has your workload snapshot. Point gbrain-evals at it for regression gating on your next release. To disable: edit `~/.gbrain/config.json` and set `"eval": {"capture": false}`.
+**Brain operators (the 99%):** run `gbrain upgrade`. Nothing changes — capture stays off, your brain stays quiet. The substrate is in place if you ever want to turn it on (e.g. to debug a retrieval issue), but you don't have to.
+
+**Contributors / maintainers:** add `export GBRAIN_CONTRIBUTOR_MODE=1` to your shell rc. Every `query`/`search` from then on writes to `eval_candidates`. After a week of dogfooding, snapshot with `gbrain eval export --since 7d > real.ndjson` and `gbrain eval replay --against real.ndjson` against your branch to gate retrieval changes. To opt out per-brain regardless of the env var: write `{"eval":{"capture":false}}` to `~/.gbrain/config.json`.
 
 **Anyone calling `hybridSearch` directly:** no change required. The return type is still `Promise<SearchResult[]>`. If you want the new meta side-channel, pass `onMeta: (m) => { ... }` in opts — otherwise leave it undefined and pay no cost.
 
@@ -63,6 +65,7 @@ Measured on this branch's diff against v0.21.0:
 
 ### Itemized changes
 
+- **`GBRAIN_CONTRIBUTOR_MODE=1` env var gates capture.** Default flipped from on-for-everyone to off-unless-opted-in. Resolution order: explicit `eval.capture` config wins both directions, then env var, then off. Production users get a quiet brain by default; contributors flip the env var in `.zshrc` and unlock the full export → replay loop. README + CONTRIBUTING document the flag prominently.
 - v31 migration: `eval_candidates` + `eval_capture_failures` on both Postgres + PGLite, RLS gated on BYPASSRLS, CHECK constraints + indexes
 - Op-layer capture wrapper in `src/core/operations.ts` (covers MCP + CLI + subagent tool-bridge from one site)
 - PII scrubber in `src/core/eval-capture-scrub.ts` (6 regex families, adversarial-input safe)
@@ -74,7 +77,7 @@ Measured on this branch's diff against v0.21.0:
 - `hybridSearch` adds `onMeta?: (m) => void` to opts (Cathedral II callers unaffected)
 - `BrainEngine` gains 5 methods (breaking-interface for custom engines, drives v0.25.0 minor bump)
 - `test/public-exports.test.ts` + `scripts/check-exports-count.sh` lock the 17-subpath public surface
-- Config gains `eval: {capture?, scrub_pii?}` (file-plane only)
+- Config gains `eval: {capture?, scrub_pii?}` (file-plane only); env var `GBRAIN_CONTRIBUTOR_MODE=1` is the contributor-facing toggle that doesn't require editing JSON
 - `listEvalCandidates` orders `created_at DESC, id DESC` (deterministic export windows)
 - `docs/eval-capture.md` — stable NDJSON schema reference for gbrain-evals
 - `gbrain doctor` `eval_capture` check now distinguishes pre-v31 missing-table (status: ok / skipped) from RLS-denied SELECT or transient DB error (status: warn) — the diagnostic that surfaces a misconfigured RLS role no longer goes silent

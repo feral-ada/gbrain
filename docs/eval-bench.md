@@ -8,10 +8,36 @@ For the **NDJSON wire format** consumed by gbrain-evals, see
 [`eval-capture.md`](./eval-capture.md). This doc is the human dev loop
 that lives on top of that format.
 
+## Prerequisite: turn on contributor mode
+
+Capture is **off by default** for production users (privacy-positive — no
+surprise data accumulation). Contributors flip it on with one line:
+
+```bash
+# In ~/.zshrc or ~/.bashrc:
+export GBRAIN_CONTRIBUTOR_MODE=1
+```
+
+Verify:
+
+```bash
+gbrain query "anything" >/dev/null
+psql $DATABASE_URL -c 'SELECT count(*) FROM eval_candidates'   # should be > 0
+```
+
+To override (force on/off regardless of env var), edit `~/.gbrain/config.json`:
+
+```json
+{"eval": {"capture": true}}    // force on
+{"eval": {"capture": false}}   // force off
+```
+
+Explicit config beats the env var both directions.
+
 ## The 4-command loop
 
 ```bash
-# ① Capture: already happening on every MCP / CLI / subagent query, capture is on by default.
+# ① Capture: writes to eval_candidates whenever CONTRIBUTOR_MODE is set.
 #   Inspect what's been collected:
 gbrain doctor                                     # surfaces capture failures
 psql $DATABASE_URL -c 'SELECT count(*) FROM eval_candidates'
@@ -172,15 +198,20 @@ pipeline (`gbrain eval --qrels` with the sibling
 
 ## Off-switch
 
-If you don't want capture at all (privacy concern, dev environment), edit
-`~/.gbrain/config.json`:
+Two ways to disable capture:
+
+```bash
+unset GBRAIN_CONTRIBUTOR_MODE             # easy: just unset the env var
+```
+
+Or force off regardless of the env var via `~/.gbrain/config.json`:
 
 ```json
 {"eval": {"capture": false}}
 ```
 
-Capture stops; existing `eval_candidates` rows stay until you `gbrain eval
-prune --older-than 0d` (or just drop the table).
+Existing `eval_candidates` rows stay until you `gbrain eval prune
+--older-than 0d` (or just drop the table).
 
 ## Failure modes
 

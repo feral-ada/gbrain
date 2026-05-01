@@ -124,12 +124,55 @@ See `docs/ENGINES.md` for the full guide. In short:
 
 The SQLite engine is designed and ready for implementation. See `docs/SQLITE_ENGINE.md`.
 
+## CONTRIBUTOR_MODE — turn on the dev loop
+
+gbrain captures retrieval traffic so you can replay real queries against
+your code changes before merging. **This is off by default** (production
+users get a quiet brain, no surprise data accumulation). Contributors turn
+it on with one shell rc line:
+
+```bash
+# In ~/.zshrc or ~/.bashrc:
+export GBRAIN_CONTRIBUTOR_MODE=1
+```
+
+That's it. Every `query` / `search` you (or agents pointed at your dev
+brain) run from that shell now writes a row to `eval_candidates`, and the
+[replay tool](#running-real-world-eval-benchmarks-touching-retrieval-code)
+has data to work against.
+
+What CONTRIBUTOR_MODE actually does:
+
+- Turns on `query`/`search` capture into the local `eval_candidates` table.
+  Without it the gate is closed and capture is a no-op.
+- That's all. PII scrubbing, retention, and replay are independent.
+
+Resolution order (most explicit wins):
+
+1. `eval.capture: true` in `~/.gbrain/config.json` → on
+2. `eval.capture: false` in `~/.gbrain/config.json` → off
+3. `GBRAIN_CONTRIBUTOR_MODE=1` → on
+4. otherwise → off
+
+Quick check that capture is actually running:
+
+```bash
+gbrain query "anything" >/dev/null
+psql $DATABASE_URL -c 'SELECT count(*) FROM eval_candidates'
+# (or `gbrain doctor` — surfaces silent capture failures cross-process)
+```
+
+To disable capture even with the env var set, write
+`{"eval": {"capture": false}}` to `~/.gbrain/config.json` — explicit config
+beats the env var both directions.
+
 ## Running real-world eval benchmarks (touching retrieval code)
 
 If your PR touches retrieval — search ranking, RRF fusion, embeddings,
 intent classification, query expansion, source boost, or the `query` /
 `search` op handlers — run `gbrain eval replay` against a snapshot of
-real traffic before merging.
+real traffic before merging. Requires `CONTRIBUTOR_MODE` (above) so you
+have captured rows to replay against.
 
 Quick loop:
 
@@ -154,8 +197,9 @@ Trigger paths (rerun if your diff touches any of these):
   searchVector SQL)
 
 See [`docs/eval-bench.md`](./docs/eval-bench.md) for the full guide
-including CI integration, hand-crafted NDJSON corpora, and the cost
-considerations. The NDJSON wire format is documented in
+including CI integration, hand-crafted NDJSON corpora (so a fresh checkout
+without captured data can still replay), and cost considerations. The
+NDJSON wire format is documented in
 [`docs/eval-capture.md`](./docs/eval-capture.md).
 
 ## Welcome PRs

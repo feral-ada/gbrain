@@ -173,19 +173,36 @@ export async function captureEvalCandidate(
 /**
  * Check whether capture is enabled for this process.
  *
- * File-plane only: reads `config.eval.capture` from the loaded GBrainConfig.
- * `gbrain config set` writes the DB plane and does NOT affect this flag.
- * Capture is on by default; returns false only when config explicitly sets
- * `eval.capture: false`.
+ * Resolution order:
+ *   1. `config.eval.capture === true`  → on (explicit user opt-in wins)
+ *   2. `config.eval.capture === false` → off (explicit user opt-out wins)
+ *   3. `process.env.GBRAIN_CONTRIBUTOR_MODE === '1'` → on (contributor opt-in)
+ *   4. otherwise → off (default-off, privacy-positive for end users)
+ *
+ * The default flipped in v0.25.0 from "on for everyone" to "off unless you
+ * opt in." Capturing every query a real user runs without their consent is
+ * a footgun even with PII scrubbing; tying capture to CONTRIBUTOR_MODE makes
+ * the developer-skill nature of the feature explicit. Production users get
+ * a quiet brain; contributors get the BrainBench-Real replay loop with one
+ * shell rc line. See docs/eval-bench.md and CONTRIBUTING.md.
  *
  * Takes the already-loaded config so callers control the loadConfig()
  * lifecycle (MCP server loads once at boot, CLI commands load per-invocation).
  */
 export function isEvalCaptureEnabled(config: GBrainConfig | null | undefined): boolean {
-  return config?.eval?.capture !== false;
+  if (config?.eval?.capture === true) return true;
+  if (config?.eval?.capture === false) return false;
+  return process.env.GBRAIN_CONTRIBUTOR_MODE === '1';
 }
 
-/** PII scrubbing enabled? Defaults to true; explicit `false` opts out. */
+/**
+ * PII scrubbing enabled? Defaults to true; explicit `false` opts out.
+ *
+ * Independent of `isEvalCaptureEnabled` — scrubbing only matters when capture
+ * is actually running, but the gate stays separate so CONTRIBUTOR_MODE
+ * doesn't accidentally turn off scrubbing on a brain that happens to also
+ * have explicit `capture: true`.
+ */
 export function isEvalScrubEnabled(config: GBrainConfig | null | undefined): boolean {
   return config?.eval?.scrub_pii !== false;
 }

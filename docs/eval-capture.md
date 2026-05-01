@@ -120,9 +120,18 @@ Reason enum (stable): `db_down` | `rls_reject` | `check_violation` |
 point — `gbrain doctor` runs in its own process and reads the table
 directly, so in-process counters wouldn't work.
 
-## Config (file-plane only)
+## Config + CONTRIBUTOR_MODE
 
-`~/.gbrain/config.json`:
+Capture is **off by default** as of v0.25.0 (was on for everyone in
+earlier drafts). Two paths to turn it on:
+
+**Path A — env var (contributor opt-in, the common case):**
+
+```bash
+export GBRAIN_CONTRIBUTOR_MODE=1     # in ~/.zshrc or ~/.bashrc
+```
+
+**Path B — explicit config (`~/.gbrain/config.json`, file-plane only):**
 
 ```json
 {
@@ -135,10 +144,17 @@ directly, so in-process counters wouldn't work.
 }
 ```
 
-Both default to `true`. Set `eval.capture: false` to disable capture
-entirely; set `eval.scrub_pii: false` to preserve raw query text
-(only if you control the brain's distribution).
+Resolution order (most explicit wins):
+
+1. `eval.capture: true` in config → on
+2. `eval.capture: false` in config → off (overrides CONTRIBUTOR_MODE=1)
+3. `GBRAIN_CONTRIBUTOR_MODE === '1'` → on
+4. otherwise → off
+
+`scrub_pii` defaults to `true` independent of capture. Set
+`eval.scrub_pii: false` to preserve raw query text (only if you control
+the brain's distribution).
 
 `gbrain config set eval.capture false` does **not** work — that
 command writes the DB-plane config, and the MCP server reads the
-file-plane. Edit the JSON directly.
+file-plane. Edit the JSON directly or use the env var.
