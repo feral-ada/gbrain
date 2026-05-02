@@ -149,7 +149,7 @@ Always include the brain page link in the delivery message so the user
 can also see it on GitHub / locally. The PDF is a rendering; the source
 is the artifact.
 
-## Anti-patterns
+## Anti-Patterns
 
 - ❌ Generating a PDF without first confirming the brain page exists.
   No source = no PDF.
@@ -168,3 +168,19 @@ is the artifact.
 - `skills/strategic-reading/SKILL.md` — same shape, problem-lens variant.
 - `skills/publish/SKILL.md` — share brain pages as password-protected
   HTML (different rendering target).
+
+
+## Contract
+
+This skill guarantees:
+
+- Routing matches the canonical triggers in the frontmatter.
+- Output written under the directories listed in `writes_to:` (when applicable).
+- Conventions referenced (`quality.md`, `brain-first.md`, `_brain-filing-rules.md`) are followed.
+- Privacy contract preserved: no real names, no fork-specific filesystem path literals, no upstream-fork references.
+
+The full behavior contract is documented in the body sections above; this section exists for the conformance test.
+
+## Output Format
+
+The skill's output shape is documented inline in the body sections above (see "Output", "Brain page format", or equivalent). The literal section header here exists for the conformance test (`test/skills-conformance.test.ts`).

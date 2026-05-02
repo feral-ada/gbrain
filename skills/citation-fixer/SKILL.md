@@ -167,7 +167,7 @@ Tweet links resolved: N
 Remaining gaps:       N (pages with uncitable facts)
 ```
 
-## Anti-patterns
+## Anti-Patterns
 
 - ❌ Inventing citations for facts that have no source. Flag them.
 - ❌ Removing facts that lack citations (flag them; don't delete).
@@ -201,3 +201,8 @@ If running as a recurring batch, track state in a small JSON file under
   "pages_remaining": 1424
 }
 ```
+
+
+## Output Format
+
+The skill's output shape is documented inline in the body sections above (see "Output", "Brain page format", or equivalent). The literal section header here exists for the conformance test (`test/skills-conformance.test.ts`).

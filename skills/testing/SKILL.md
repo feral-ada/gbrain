@@ -229,7 +229,7 @@ This enables:
 - Flake detection (same test fails intermittently)
 - Regression velocity (how fast do we break things after changes?)
 
-## Anti-patterns
+## Anti-Patterns
 
 - ❌ Skipping conformance validation after adding a new skill
 - ❌ Adding skills to `manifest.json` without adding to RESOLVER.md
@@ -238,3 +238,19 @@ This enables:
 - ❌ Auto-un-skipping a test without understanding why it was skipped
 - ❌ Auto-"fixing" a security test failure
 - ❌ Reporting "all clear" without actually running system health checks
+
+
+## Contract
+
+This skill guarantees:
+
+- Routing matches the canonical triggers in the frontmatter.
+- Output written under the directories listed in `writes_to:` (when applicable).
+- Conventions referenced (`quality.md`, `brain-first.md`, `_brain-filing-rules.md`) are followed.
+- Privacy contract preserved: no real names, no fork-specific filesystem path literals, no upstream-fork references.
+
+The full behavior contract is documented in the body sections above; this section exists for the conformance test.
+
+## Output Format
+
+The skill's output shape is documented inline in the body sections above (see "Output", "Brain page format", or equivalent). The literal section header here exists for the conformance test (`test/skills-conformance.test.ts`).

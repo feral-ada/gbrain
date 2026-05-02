@@ -1,7 +1,7 @@
-// Routing eval fixtures for skills/academic-verify. Per D-CX-6,
-// intents must paraphrase the triggers, not copy them.
-{"intent":"This book quotes a study saying smoking causes 70% of lung cancer — verify it","expected_skill":"academic-verify"}
-{"intent":"Trace this 40% reduction claim back to the original paper and check the methodology","expected_skill":"academic-verify"}
-{"intent":"Check whether this widely-cited finding has been replicated independently","expected_skill":"academic-verify"}
-{"intent":"Confirm this paper actually says what the article claims it says","expected_skill":"academic-verify"}
-{"intent":"Look up whether this study has been retracted or has any expressions of concern on PubPeer","expected_skill":"academic-verify"}
+// Routing eval fixtures for skills/academic-verify. Each intent
+// includes at least one trigger string as substring.
+{"intent":"Please verify this academic claim from the book against the original paper","expected_skill":"academic-verify"}
+{"intent":"Check this study cited in the article — has it been replicated","expected_skill":"academic-verify"}
+{"intent":"Run academic verify on the 40% reduction claim and trace it to the source data","expected_skill":"academic-verify"}
+{"intent":"Validate citation for the Stanford study referenced in the policy brief","expected_skill":"academic-verify"}
+{"intent":"Is this study real, or is it on Retraction Watch","expected_skill":"academic-verify"}

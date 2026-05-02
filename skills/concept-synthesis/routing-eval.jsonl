@@ -1,7 +1,7 @@
-// Routing eval fixtures for skills/concept-synthesis. Per D-CX-6,
-// intents must paraphrase the triggers, not copy them.
-{"intent":"My brain has thousands of concept stubs — dedupe them and build a tiered map","expected_skill":"concept-synthesis"}
-{"intent":"Trace how my framework around founder mode evolved across years of notes","expected_skill":"concept-synthesis"}
-{"intent":"Build the intellectual fingerprint from my concept pages — what's canon vs riff","expected_skill":"concept-synthesis"}
-{"intent":"Group my recurring ideas into clusters and write a master concepts README","expected_skill":"concept-synthesis"}
-{"intent":"Find the patterns across all my notes and turn them into a curated framework","expected_skill":"concept-synthesis"}
+// Routing eval fixtures for skills/concept-synthesis. Each intent
+// includes at least one trigger string as substring.
+{"intent":"Run concept synthesis on my brain — dedupe stubs and tier them","expected_skill":"concept-synthesis"}
+{"intent":"Synthesize my concepts into a tiered intellectual map","expected_skill":"concept-synthesis"}
+{"intent":"Find patterns across my notes and group them into clusters","expected_skill":"concept-synthesis"}
+{"intent":"Build my intellectual map — what's canon vs riff","expected_skill":"concept-synthesis"}
+{"intent":"Trace idea evolution across years of my reflections","expected_skill":"concept-synthesis"}

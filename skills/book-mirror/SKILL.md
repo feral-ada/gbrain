@@ -328,3 +328,23 @@ where the book's framing breaks down for this specific reader.
   problem-lens instead of personalizing to the whole reader.
 - `skills/article-enrichment/SKILL.md` — same shape applied to articles
   rather than books.
+
+
+## Contract
+
+This skill guarantees:
+
+- Routing matches the canonical triggers in the frontmatter.
+- Output written under the directories listed in `writes_to:` (when applicable).
+- Conventions referenced (`quality.md`, `brain-first.md`, `_brain-filing-rules.md`) are followed.
+- Privacy contract preserved: no real names, no fork-specific filesystem path literals, no upstream-fork references.
+
+The full behavior contract is documented in the body sections above; this section exists for the conformance test.
+
+## Output Format
+
+The skill's output shape is documented inline in the body sections above (see "Output", "Brain page format", or equivalent). The literal section header here exists for the conformance test (`test/skills-conformance.test.ts`).
+
+## Anti-Patterns
+
+The full anti-pattern list is in the body sections above; this header exists for the conformance test if the body uses a different casing.

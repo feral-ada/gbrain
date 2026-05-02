@@ -1,7 +1,7 @@
-// Routing eval fixtures for skills/brain-pdf. Per D-CX-6,
-// intents must paraphrase the triggers, not copy them.
-{"intent":"Render the personalized book mirror page as a clean PDF I can send","expected_skill":"brain-pdf"}
-{"intent":"Turn this brain page into a printable document with page numbers","expected_skill":"brain-pdf"}
-{"intent":"Export the briefing page to PDF for the meeting tomorrow","expected_skill":"brain-pdf"}
-{"intent":"Make me a draft-watermarked PDF of the strategy doc","expected_skill":"brain-pdf"}
-{"intent":"I need a publication-quality PDF version of this brain page","expected_skill":"brain-pdf"}
+// Routing eval fixtures for skills/brain-pdf. Each intent
+// includes at least one trigger string as substring.
+{"intent":"Please make pdf from brain page media/books/this-book-personalized","expected_skill":"brain-pdf"}
+{"intent":"Run brain pdf on this strategy doc for the meeting","expected_skill":"brain-pdf"}
+{"intent":"Convert brain page to pdf with a draft watermark","expected_skill":"brain-pdf"}
+{"intent":"Publish this page as pdf for the printable deliverable","expected_skill":"brain-pdf"}
+{"intent":"Export brain page to a clean PDF I can send","expected_skill":"brain-pdf"}

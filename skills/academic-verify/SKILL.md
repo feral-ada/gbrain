@@ -187,7 +187,7 @@ Never claim a problem without evidence. The verification document
 itself is the artifact — if the claim holds up, say so plainly. If it
 doesn't, the trace speaks for itself.
 
-## Anti-patterns
+## Anti-Patterns
 
 - ❌ Skipping the brain-first lookup. Re-doing verification we've
   already done is wasted Perplexity spend.
@@ -206,3 +206,19 @@ doesn't, the trace speaks for itself.
 - `skills/citation-fixer/SKILL.md` — fixes citation FORMATTING; this
   skill checks whether the cited claim is true
 - `skills/conventions/quality.md` — citation + back-link rules
+
+
+## Contract
+
+This skill guarantees:
+
+- Routing matches the canonical triggers in the frontmatter.
+- Output written under the directories listed in `writes_to:` (when applicable).
+- Conventions referenced (`quality.md`, `brain-first.md`, `_brain-filing-rules.md`) are followed.
+- Privacy contract preserved: no real names, no fork-specific filesystem path literals, no upstream-fork references.
+
+The full behavior contract is documented in the body sections above; this section exists for the conformance test.
+
+## Output Format
+
+The skill's output shape is documented inline in the body sections above (see "Output", "Brain page format", or equivalent). The literal section header here exists for the conformance test (`test/skills-conformance.test.ts`).

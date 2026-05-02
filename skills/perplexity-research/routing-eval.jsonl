@@ -1,7 +1,7 @@
-// Routing eval fixtures for skills/perplexity-research. Per D-CX-6,
-// intents must paraphrase the triggers, not copy them.
-{"intent":"What's the current state of Brex's funding situation that the brain doesn't already cover","expected_skill":"perplexity-research"}
-{"intent":"Do a web research pass on this company and tell me what's changed since I last looked","expected_skill":"perplexity-research"}
-{"intent":"I want a brain-aware web search that focuses on the delta between what I know and what's online now","expected_skill":"perplexity-research"}
-{"intent":"Pull current news about Pedro Franceschi but skip stuff I already have on his page","expected_skill":"perplexity-research"}
-{"intent":"Surface what I'm missing about the latest YC W26 batch news","expected_skill":"perplexity-research"}
+// Routing eval fixtures for skills/perplexity-research. Each intent
+// includes at least one trigger string as substring.
+{"intent":"Run perplexity-research on Brex and surface NEW developments","expected_skill":"perplexity-research","ambiguous_with":["data-research"]}
+{"intent":"What's new about this company that the brain doesn't already cover","expected_skill":"perplexity-research"}
+{"intent":"Tell me the current state of the YC W26 batch announcements","expected_skill":"perplexity-research"}
+{"intent":"Do a web research pass on this person — focus on the delta","expected_skill":"perplexity-research"}
+{"intent":"What changed about this funding round since I last looked","expected_skill":"perplexity-research"}

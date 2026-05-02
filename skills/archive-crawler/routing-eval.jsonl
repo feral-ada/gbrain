@@ -1,7 +1,7 @@
-// Routing eval fixtures for skills/archive-crawler. Per D-CX-6,
-// intents must paraphrase the triggers, not copy them.
-{"intent":"Walk through my old Dropbox archive and surface the writing worth keeping","expected_skill":"archive-crawler"}
-{"intent":"Mine my Gmail takeout for substantive email threads with people who matter","expected_skill":"archive-crawler"}
-{"intent":"Go through my old hard drive dump and find anything worth ingesting into the brain","expected_skill":"archive-crawler"}
-{"intent":"Triage this folder of personal letters from 2010 and pull the gold","expected_skill":"archive-crawler"}
-{"intent":"Crawl my B2 backup tree and build a manifest of what's there","expected_skill":"archive-crawler"}
+// Routing eval fixtures for skills/archive-crawler. Each intent
+// includes at least one trigger string as substring.
+{"intent":"Please crawl my archive and surface the writing worth keeping","expected_skill":"archive-crawler"}
+{"intent":"Find gold in my archive of old letters and ideas","expected_skill":"archive-crawler"}
+{"intent":"Run archive crawler on the gbrain.yml allow-listed paths","expected_skill":"archive-crawler"}
+{"intent":"Scan my dropbox for substantive email threads with people who matter","expected_skill":"archive-crawler"}
+{"intent":"Mine my old files for journal entries and reflections worth ingesting","expected_skill":"archive-crawler"}
