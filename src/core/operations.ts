@@ -179,11 +179,24 @@ export interface Logger {
   error(msg: string): void;
 }
 
+export interface AuthInfo {
+  token: string;
+  clientId: string;
+  scopes: string[];
+  expiresAt?: number;
+}
+
 export interface OperationContext {
   engine: BrainEngine;
   config: GBrainConfig;
   logger: Logger;
   dryRun: boolean;
+  /**
+   * OAuth auth info (v0.8+). Present when the caller authenticated via OAuth 2.1
+   * through `gbrain serve --http`. Contains clientId and granted scopes for
+   * per-operation scope enforcement.
+   */
+  auth?: AuthInfo;
   /**
    * True when the caller is remote/untrusted (MCP over stdio/HTTP, or any agent-facing entry point).
    * False for local CLI invocations by the owner of the machine.
@@ -231,6 +244,24 @@ export interface OperationContext {
    * background work.
    */
   cliOpts?: { quiet: boolean; progressJson: boolean; progressInterval: number };
+  /**
+   * Connected-gbrains brain id (v0.19+). Identifies which brain this op is
+   * targeting. 'host' for the default brain configured in ~/.gbrain/config.json;
+   * otherwise a mount id registered in ~/.gbrain/mounts.json.
+   *
+   * `ctx.engine` is the resolved BrainEngine for this id (populated by
+   * BrainRegistry at dispatch time). `brainId` exists alongside for:
+   * - audit logging (mount-ops JSONL carries the id)
+   * - subagent inheritance (child jobs receive the parent's brainId)
+   * - cross-brain citation prefixes in agent output
+   *
+   * Orthogonal to v0.18.0's source_id, which scopes per-repo WITHIN a brain.
+   * See docs/architecture/brains-and-sources.md for the mental model.
+   *
+   * Omitted = 'host' (pre-v0.19 callers + single-brain deployments keep
+   * working without change).
+   */
+  brainId?: string;
 }
 
 export interface Operation {
@@ -239,6 +270,8 @@ export interface Operation {
   params: Record<string, ParamDef>;
   handler: (ctx: OperationContext, params: Record<string, unknown>) => Promise<unknown>;
   mutating?: boolean;
+  scope?: 'read' | 'write' | 'admin';
+  localOnly?: boolean;
   cliHints?: {
     name?: string;
     positional?: string[];
@@ -280,6 +313,7 @@ const get_page: Operation = {
     const tags = await ctx.engine.getTags(page.slug);
     return { ...page, tags, ...(resolved_slug ? { resolved_slug } : {}) };
   },
+  scope: 'read',
   cliHints: { name: 'get', positional: ['slug'] },
 };
 
@@ -291,6 +325,7 @@ const put_page: Operation = {
     content: { type: 'string', required: true, description: 'Full markdown content with YAML frontmatter' },
   },
   mutating: true,
+  scope: 'write',
   handler: async (ctx, p) => {
     const slug = p.slug as string;
 
@@ -586,6 +621,7 @@ const delete_page: Operation = {
     slug: { type: 'string', required: true },
   },
   mutating: true,
+  scope: 'write',
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'delete_page', slug: p.slug };
     await ctx.engine.deletePage(p.slug as string);
@@ -615,6 +651,7 @@ const list_pages: Operation = {
       updated_at: pg.updated_at,
     }));
   },
+  scope: 'read',
   cliHints: { name: 'list' },
 };
 
@@ -662,6 +699,7 @@ const search: Operation = {
 
     return results;
   },
+  scope: 'read',
   cliHints: { name: 'search', positional: ['query'] },
 };
 
@@ -733,6 +771,7 @@ const query: Operation = {
 
     return results;
   },
+  scope: 'read',
   cliHints: { name: 'query', positional: ['query'] },
 };
 
@@ -746,6 +785,7 @@ const add_tag: Operation = {
     tag: { type: 'string', required: true },
   },
   mutating: true,
+  scope: 'write',
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'add_tag', slug: p.slug, tag: p.tag };
     await ctx.engine.addTag(p.slug as string, p.tag as string);
@@ -762,6 +802,7 @@ const remove_tag: Operation = {
     tag: { type: 'string', required: true },
   },
   mutating: true,
+  scope: 'write',
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'remove_tag', slug: p.slug, tag: p.tag };
     await ctx.engine.removeTag(p.slug as string, p.tag as string);
@@ -779,6 +820,7 @@ const get_tags: Operation = {
   handler: async (ctx, p) => {
     return ctx.engine.getTags(p.slug as string);
   },
+  scope: 'read',
   cliHints: { name: 'tags', positional: ['slug'] },
 };
 
@@ -794,6 +836,7 @@ const add_link: Operation = {
     context: { type: 'string', description: 'Context for the link' },
   },
   mutating: true,
+  scope: 'write',
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'add_link', from: p.from, to: p.to };
     await ctx.engine.addLink(
@@ -813,6 +856,7 @@ const remove_link: Operation = {
     to: { type: 'string', required: true },
   },
   mutating: true,
+  scope: 'write',
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'remove_link', from: p.from, to: p.to };
     await ctx.engine.removeLink(p.from as string, p.to as string);
@@ -830,6 +874,7 @@ const get_links: Operation = {
   handler: async (ctx, p) => {
     return ctx.engine.getLinks(p.slug as string);
   },
+  scope: 'read',
 };
 
 const get_backlinks: Operation = {
@@ -841,6 +886,7 @@ const get_backlinks: Operation = {
   handler: async (ctx, p) => {
     return ctx.engine.getBacklinks(p.slug as string);
   },
+  scope: 'read',
   cliHints: { name: 'backlinks', positional: ['slug'] },
 };
 
@@ -879,6 +925,7 @@ const traverse_graph: Operation = {
     }
     return ctx.engine.traversePaths(slug, { depth, linkType, direction });
   },
+  scope: 'read',
   cliHints: { name: 'graph', positional: ['slug'] },
 };
 
@@ -895,6 +942,7 @@ const add_timeline_entry: Operation = {
     source: { type: 'string' },
   },
   mutating: true,
+  scope: 'write',
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'add_timeline_entry', slug: p.slug };
     const date = p.date as string;
@@ -933,6 +981,7 @@ const get_timeline: Operation = {
   handler: async (ctx, p) => {
     return ctx.engine.getTimeline(p.slug as string);
   },
+  scope: 'read',
   cliHints: { name: 'timeline', positional: ['slug'] },
 };
 
@@ -945,6 +994,7 @@ const get_stats: Operation = {
   handler: async (ctx) => {
     return ctx.engine.getStats();
   },
+  scope: 'admin',
   cliHints: { name: 'stats' },
 };
 
@@ -955,6 +1005,7 @@ const get_health: Operation = {
   handler: async (ctx) => {
     return ctx.engine.getHealth();
   },
+  scope: 'admin',
   cliHints: { name: 'health' },
 };
 
@@ -967,6 +1018,7 @@ const get_versions: Operation = {
   handler: async (ctx, p) => {
     return ctx.engine.getVersions(p.slug as string);
   },
+  scope: 'read',
   cliHints: { name: 'history', positional: ['slug'] },
 };
 
@@ -978,6 +1030,7 @@ const revert_version: Operation = {
     version_id: { type: 'number', required: true },
   },
   mutating: true,
+  scope: 'write',
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'revert_version', slug: p.slug, version_id: p.version_id };
     await ctx.engine.createVersion(p.slug as string);
@@ -1000,6 +1053,8 @@ const sync_brain: Operation = {
     no_embed: { type: 'boolean', description: 'Skip embedding generation' },
   },
   mutating: true,
+  scope: 'admin',
+  localOnly: true,
   handler: async (ctx, p) => {
     const { performSync } = await import('../commands/sync.ts');
     return performSync(ctx.engine, {
@@ -1024,6 +1079,7 @@ const put_raw_data: Operation = {
     data: { type: 'object', required: true, description: 'Raw data object' },
   },
   mutating: true,
+  scope: 'write',
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'put_raw_data', slug: p.slug, source: p.source };
     await ctx.engine.putRawData(p.slug as string, p.source as string, p.data as object);
@@ -1041,6 +1097,7 @@ const get_raw_data: Operation = {
   handler: async (ctx, p) => {
     return ctx.engine.getRawData(p.slug as string, p.source as string | undefined);
   },
+  scope: 'read',
 };
 
 // --- Resolution & Chunks ---
@@ -1054,6 +1111,7 @@ const resolve_slugs: Operation = {
   handler: async (ctx, p) => {
     return ctx.engine.resolveSlugs(p.partial as string);
   },
+  scope: 'read',
 };
 
 const get_chunks: Operation = {
@@ -1065,6 +1123,7 @@ const get_chunks: Operation = {
   handler: async (ctx, p) => {
     return ctx.engine.getChunks(p.slug as string);
   },
+  scope: 'read',
 };
 
 // --- Ingest Log ---
@@ -1079,6 +1138,7 @@ const log_ingest: Operation = {
     summary: { type: 'string', required: true },
   },
   mutating: true,
+  scope: 'write',
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'log_ingest' };
     await ctx.engine.logIngest({
@@ -1100,6 +1160,7 @@ const get_ingest_log: Operation = {
   handler: async (ctx, p) => {
     return ctx.engine.getIngestLog({ limit: clampSearchLimit(p.limit as number | undefined, 20, 50) });
   },
+  scope: 'read',
 };
 
 // --- File Operations ---
@@ -1115,6 +1176,8 @@ const file_list: Operation = {
   params: {
     slug: { type: 'string', description: 'Filter by page slug' },
   },
+  scope: 'admin',
+  localOnly: true,
   handler: async (_ctx, p) => {
     const sql = db.getConnection();
     const slug = p.slug as string | undefined;
@@ -1133,6 +1196,8 @@ const file_upload: Operation = {
     page_slug: { type: 'string', description: 'Associate with page' },
   },
   mutating: true,
+  scope: 'admin',
+  localOnly: true,
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'file_upload', path: p.path };
 
@@ -1213,6 +1278,8 @@ const file_url: Operation = {
   params: {
     storage_path: { type: 'string', required: true },
   },
+  scope: 'admin',
+  localOnly: true,
   handler: async (_ctx, p) => {
     const sql = db.getConnection();
     const rows = await sql`SELECT storage_path, mime_type, size_bytes FROM files WHERE storage_path = ${p.storage_path as string}`;
@@ -1239,6 +1306,7 @@ const submit_job: Operation = {
     timeout_ms: { type: 'number', description: 'Per-job wall-clock timeout in ms; aborted job goes to dead' },
   },
   mutating: true,
+  scope: 'admin',
   handler: async (ctx, p) => {
     const name = typeof p.name === 'string' ? p.name.trim() : '';
     if (ctx.dryRun) return { dry_run: true, action: 'submit_job', name };
@@ -1275,6 +1343,7 @@ const get_job: Operation = {
   params: {
     id: { type: 'number', required: true, description: 'Job ID' },
   },
+  scope: 'admin',
   handler: async (ctx, p) => {
     const { MinionQueue } = await import('./minions/queue.ts');
     const queue = new MinionQueue(ctx.engine);
@@ -1293,6 +1362,7 @@ const list_jobs: Operation = {
     name: { type: 'string', description: 'Filter by job type' },
     limit: { type: 'number', description: 'Max results (default: 50)' },
   },
+  scope: 'admin',
   handler: async (ctx, p) => {
     const { MinionQueue } = await import('./minions/queue.ts');
     const queue = new MinionQueue(ctx.engine);
@@ -1312,6 +1382,7 @@ const cancel_job: Operation = {
     id: { type: 'number', required: true, description: 'Job ID' },
   },
   mutating: true,
+  scope: 'admin',
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'cancel_job', id: p.id };
     const { MinionQueue } = await import('./minions/queue.ts');
@@ -1329,6 +1400,7 @@ const retry_job: Operation = {
     id: { type: 'number', required: true, description: 'Job ID' },
   },
   mutating: true,
+  scope: 'admin',
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'retry_job', id: p.id };
     const { MinionQueue } = await import('./minions/queue.ts');
@@ -1345,6 +1417,7 @@ const get_job_progress: Operation = {
   params: {
     id: { type: 'number', required: true, description: 'Job ID' },
   },
+  scope: 'admin',
   handler: async (ctx, p) => {
     const { MinionQueue } = await import('./minions/queue.ts');
     const queue = new MinionQueue(ctx.engine);
@@ -1360,6 +1433,7 @@ const pause_job: Operation = {
   params: {
     id: { type: 'number', required: true, description: 'Job ID' },
   },
+  scope: 'admin',
   handler: async (ctx, p) => {
     const { MinionQueue } = await import('./minions/queue.ts');
     const queue = new MinionQueue(ctx.engine);
@@ -1375,6 +1449,7 @@ const resume_job: Operation = {
   params: {
     id: { type: 'number', required: true, description: 'Job ID' },
   },
+  scope: 'admin',
   handler: async (ctx, p) => {
     const { MinionQueue } = await import('./minions/queue.ts');
     const queue = new MinionQueue(ctx.engine);
@@ -1391,6 +1466,7 @@ const replay_job: Operation = {
     id: { type: 'number', required: true, description: 'Source job ID to replay' },
     data_overrides: { type: 'object', required: false, description: 'Data fields to override (merged with original)' },
   },
+  scope: 'admin',
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'replay_job', id: p.id };
     const { MinionQueue } = await import('./minions/queue.ts');
@@ -1409,6 +1485,7 @@ const send_job_message: Operation = {
     payload: { type: 'object', required: true, description: 'Message payload (arbitrary JSON)' },
     sender: { type: 'string', required: false, description: 'Sender identity (default: admin)' },
   },
+  scope: 'admin',
   handler: async (ctx, p) => {
     if (ctx.dryRun) return { dry_run: true, action: 'send_job_message', id: p.id };
     const { MinionQueue } = await import('./minions/queue.ts');
@@ -1430,6 +1507,7 @@ const find_orphans: Operation = {
       description: 'Include auto-generated and pseudo pages (default: false)',
     },
   },
+  scope: 'read',
   handler: async (ctx, p) => {
     const { findOrphans } = await import('../commands/orphans.ts');
     return findOrphans(ctx.engine, { includePseudo: (p.include_pseudo as boolean) || false });
