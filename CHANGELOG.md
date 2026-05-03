@@ -2,6 +2,60 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.26.5] - 2026-05-03
+
+## **Destructive operation guard. The blast radius is visible before you pull the trigger, and recoverable for 72 hours after.**
+## **`sources remove` now requires `--confirm-destructive` when there's data on the line. `--yes` alone is no longer enough.**
+
+A federated source with thousands of pages, chunks, and embeddings shouldn't be one stray `--yes` away from gone. v0.26.5 adds three layers of protection to every destructive sources operation: an impact preview that prints the exact page / chunk / embedding / file counts before acting, a confirmation gate that requires the explicit `--confirm-destructive` flag (not just `--yes`) when data exists, and a soft-delete path that tombstones a source for 72 hours so you can restore it without touching a backup.
+
+The motivating incident: an agent removed a federated source instead of clarifying intent. Data was unrecoverable. The fix puts the guardrail in the tool itself, where it survives operator and agent forgetfulness equally.
+
+### The numbers that matter
+
+| Metric | BEFORE v0.26.5 | AFTER v0.26.5 | Δ |
+|---|---|---|---|
+| `sources remove --yes` blast radius shown | hidden | full preview box (pages, chunks, embeddings, files) | visible upfront |
+| Flag required to delete data | `--yes` | `--confirm-destructive` (additionally) | explicit intent |
+| Recovery window after accidental remove | 0s | 72h soft-delete TTL | restorable |
+| Subcommands for sources lifecycle | remove | archive, restore, archived, purge, remove | +4 |
+
+### What this means for operators
+
+If you have any scripts that call `gbrain sources remove <id> --yes`, they will refuse to delete sources with data and exit with a message pointing at `--confirm-destructive` (or the safer `gbrain sources archive`). Update the script with the explicit flag, or switch to the archive workflow: `archive` → verify nothing breaks → `purge` once you're sure (or just let the 72h TTL run).
+
+For day-to-day work, prefer `gbrain sources archive <id>`. It hides the source from search and federation immediately, preserves all data for 72 hours, and is reversible with `gbrain sources restore <id>`. Permanent deletion only ever requires `--confirm-destructive`.
+
+## To take advantage of v0.26.5
+
+`gbrain upgrade` is sufficient. No schema migration; archive state is stored in the existing `sources.config` JSONB column.
+
+```bash
+gbrain upgrade
+gbrain --version  # should print 0.26.5
+gbrain sources --help  # archive / restore / archived / purge / remove
+```
+
+If a `sources remove --yes` script of yours starts refusing, that's the new gate working. Add `--confirm-destructive` only if you actually want permanent deletion. Otherwise switch to `archive` and let the TTL handle the rest.
+
+### Itemized changes
+
+#### New module: `src/core/destructive-guard.ts`
+- `assessDestructiveImpact(engine, sourceId)` — counts pages, chunks, embeddings, and files for a source by walking `pages`, `content_chunks` (joined to pages), and `files`. Returns a `DestructiveImpact` with a human-readable summary line.
+- `checkDestructiveConfirmation(impact, opts)` — fail-closed gate. Dry runs always pass. Empty sources (no pages, no chunks, no files) pass. Otherwise `--confirm-destructive` is required; `--yes` alone returns a block message pointing at `archive` and `--dry-run`.
+- `softDeleteSource` / `restoreSource` / `listArchivedSources` / `purgeExpiredSources` — soft-delete lifecycle keyed off `sources.config` JSONB (`archived`, `archived_at`, `archive_expires_at`, `federated: false`). 72-hour TTL constant exported as `SOFT_DELETE_TTL_HOURS`.
+- `formatImpact` / `formatSoftDelete` — terminal display helpers that print the boxed preview and the post-archive guidance with restore + purge commands.
+
+#### Updated CLI: `src/commands/sources.ts`
+- `gbrain sources remove <id>` now runs the impact preview before acting and routes through `checkDestructiveConfirmation`. With data present and only `--yes`, exits with the new guidance message.
+- `gbrain sources archive <id>` — soft-delete; hides from search, preserves data 72h.
+- `gbrain sources restore <id>` — un-archive, re-federate.
+- `gbrain sources archived [--json]` — list soft-deleted sources with their TTL.
+- `gbrain sources purge [<id>] [--confirm-destructive]` — permanent delete; with no id, purges all sources whose TTL has expired.
+
+#### Mechanics
+- `VERSION` → `0.26.5`. `package.json` → `0.26.5`. `bun.lock` refreshed.
+
 ## [0.26.2] - 2026-05-03
 
 ## **MCP fix-wave: every postgres-as-string OAuth bug, killed at the boundary.**
