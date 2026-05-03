@@ -219,6 +219,9 @@ async function initPGLite(opts: {
       console.log('');
       console.log('When you outgrow local: gbrain migrate --to supabase');
       reportModStatus();
+      const { printAdvisoryIfRecommended } = await import('../core/skillpack/post-install-advisory.ts');
+      const { VERSION } = await import('../version.ts');
+      printAdvisoryIfRecommended({ version: VERSION, context: 'init' });
     }
   } finally {
     try { await engine.disconnect(); } catch { /* best-effort */ }
@@ -321,6 +324,9 @@ async function initPostgres(opts: {
         console.log('Next: gbrain import <dir>');
       }
       reportModStatus();
+      const { printAdvisoryIfRecommended } = await import('../core/skillpack/post-install-advisory.ts');
+      const { VERSION } = await import('../version.ts');
+      printAdvisoryIfRecommended({ version: VERSION, context: 'init' });
     }
   } finally {
     try { await engine.disconnect(); } catch { /* best-effort */ }
