@@ -950,21 +950,23 @@ describe('migration v31 — eval_capture_tables', () => {
   });
 });
 
-describe('migration v36 — pages_emotional_weight (v0.29)', () => {
-  // Renumbered from v34 → v36 on merge with master: v0.26 OAuth claimed v32,
-  // v0.26.3 admin-dashboard claimed v33, v0.28 takes_table + access_tokens_permissions
-  // landed at v34/v35. The CREATE/ALTER statements are idempotent so any brain that
-  // previously applied this at v34 (pre-renumber) sees v36 as new and runs IF NOT
-  // EXISTS DDL cleanly.
+describe('migration v37 — pages_emotional_weight (v0.29)', () => {
+  // Renumbered v34 → v36 → v37 across two master merges:
+  //   v0.26 OAuth claimed v32, v0.26.3 admin-dashboard claimed v33,
+  //   v0.28 takes_table + access_tokens_permissions landed at v34/v35
+  //   (later renumbered to v35/v36), v0.26.5 destructive_guard_columns
+  //   landed at v34.
+  // The CREATE/ALTER statements are idempotent so any brain that previously
+  // applied this at v34/v36 sees v37 as new and runs IF NOT EXISTS DDL cleanly.
   test('exists with the expected name', () => {
-    const v36 = MIGRATIONS.find(m => m.version === 36);
-    expect(v36).toBeDefined();
-    expect(v36?.name).toBe('pages_emotional_weight');
+    const v37 = MIGRATIONS.find(m => m.version === 37);
+    expect(v37).toBeDefined();
+    expect(v37?.name).toBe('pages_emotional_weight');
   });
 
   test('adds emotional_weight REAL NOT NULL DEFAULT 0.0 to pages', () => {
-    const v36 = MIGRATIONS.find(m => m.version === 36);
-    const sql = v36!.sql || '';
+    const v37 = MIGRATIONS.find(m => m.version === 37);
+    const sql = v37!.sql || '';
     expect(sql).toContain('ALTER TABLE pages');
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS emotional_weight');
     expect(sql).toContain('REAL');
@@ -974,14 +976,14 @@ describe('migration v36 — pages_emotional_weight (v0.29)', () => {
   test('does NOT create an idx_pages_emotional_weight index (eng review D6)', () => {
     // Salience query orders by computed score, not raw weight; the index
     // would never be used. Adding it later requires a separate migration.
-    const v36 = MIGRATIONS.find(m => m.version === 36);
-    const sql = v36!.sql || '';
+    const v37 = MIGRATIONS.find(m => m.version === 37);
+    const sql = v37!.sql || '';
     expect(sql).not.toContain('idx_pages_emotional_weight');
     expect(sql).not.toContain('CREATE INDEX');
   });
 
-  test('LATEST_VERSION caught up to 36', () => {
-    expect(LATEST_VERSION).toBeGreaterThanOrEqual(36);
+  test('LATEST_VERSION caught up to 37', () => {
+    expect(LATEST_VERSION).toBeGreaterThanOrEqual(37);
   });
 });
 

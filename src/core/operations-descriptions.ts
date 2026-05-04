@@ -49,7 +49,9 @@ export const GET_RECENT_TRANSCRIPTS_DESCRIPTION =
 export const LIST_PAGES_DESCRIPTION =
   "List pages with optional filters. " +
   "For 'what's recent / what did I touch this week' questions, use list_pages " +
-  "with sort=updated_desc instead of semantic search.";
+  "with sort=updated_desc instead of semantic search. " +
+  "Soft-deleted pages are hidden by default; pass include_deleted: true to " +
+  "surface them with deleted_at populated.";
 
 export const QUERY_DESCRIPTION =
   "Hybrid search with vector + keyword + multi-query expansion. " +

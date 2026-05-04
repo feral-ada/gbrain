@@ -20,6 +20,12 @@ export interface Page {
   emotional_weight?: number;
   created_at: Date;
   updated_at: Date;
+  /**
+   * v0.26.5: when present, the page is soft-deleted. Hidden from search and
+   * from `getPage` / `listPages` by default; surface via `include_deleted: true`.
+   * The autopilot purge phase hard-deletes rows where `deleted_at < now() - 72h`.
+   */
+  deleted_at?: Date | null;
 }
 
 export type PageKind = 'markdown' | 'code';
@@ -56,12 +62,27 @@ export interface PageFilters {
    */
   slugPrefix?: string;
   /**
+   * v0.26.5: include soft-deleted pages (rows with `deleted_at IS NOT NULL`).
+   * Default false: hides soft-deleted pages from `list_pages` so agents see the
+   * same set search returns. Set true to enumerate the recoverable set during
+   * the 72h window before the autopilot purge phase hard-deletes them.
+   */
+  includeDeleted?: boolean;
+  /**
    * v0.29: ORDER BY enum. Default `updated_desc` matches pre-v0.29 behavior
    * (engines hardcoded `ORDER BY updated_at DESC`). New options: `updated_asc`,
    * `created_desc`, `slug` (alphabetical, useful for stable pagination).
    * Whitelisted enum — no SQL-injection risk; engines map to literal SQL fragments.
    */
   sort?: 'updated_desc' | 'updated_asc' | 'created_desc' | 'slug';
+}
+
+/** v0.26.5 — opts for getPage / softDeletePage / restorePage. */
+export interface GetPageOpts {
+  /** Filter to a specific source. When omitted, getPage returns the first slug match across sources (pre-existing semantics). */
+  sourceId?: string;
+  /** Include soft-deleted pages. Default false. See PageFilters.includeDeleted. */
+  includeDeleted?: boolean;
 }
 
 /** v0.29: literal ORDER BY fragments for the PageFilters.sort enum. Whitelisted. */
