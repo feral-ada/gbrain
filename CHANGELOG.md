@@ -29,7 +29,7 @@ master..HEAD --stat`:
 | Engine methods on BrainEngine | 41 | 50 | +9 |
 | MCP operations | 41 | 44 | +3 (takes_list, takes_search, think) |
 | New SQL tables | — | 2 | takes + synthesis_evidence (HNSW partial index, FK CASCADE) |
-| Schema migrations | v31 | v33 | +v32 (takes), +v33 (access_tokens.permissions JSONB) |
+| Schema migrations | v33 | v35 | +v34 (takes), +v35 (access_tokens.permissions JSONB) |
 | New unit/integration tests | — | 75 | 36 takes + 10 page-lock + 11 model-config + 8 MCP allow-list + 5 extract + 5 fence parity |
 | New CLI commands | — | 1 family | `gbrain takes <list\|search\|add\|update\|supersede\|resolve>` + `gbrain auth permissions` |
 | Privacy holes closed | 1 P0 | 0 | takes content stripped from page chunks before indexing (Codex P0 #3) |
@@ -54,6 +54,251 @@ incrementally so the contracts are stable for SDK callers from day one.
 
 `gbrain upgrade` should do this automatically. If it didn't, or if `gbrain
 doctor` warns about an incomplete migration:
+## [0.26.3] - 2026-05-03
+
+## **Admin dashboard you can trust. Magic-link login, single-use URLs, per-client token TTLs, observable everything.**
+## **OAuth clients and bearer tokens in one unified table. Auth-type-aware setup for five MCP clients.**
+
+v0.26.0 shipped the admin dashboard. v0.26.3 makes it production-trustworthy. The bootstrap token never persists in browser JS state. Magic-link URLs are single-use server-issued nonces (the bootstrap token never appears in a URL). Cookie sessions are HttpOnly + SameSite=Strict, and a "Sign out everywhere" button revokes every active session in one click. The trust model now matches what the marketing copy already implied.
+
+Both auth lanes are visible. OAuth clients and legacy `access_tokens` show up in one unified Agents table with resolved names, last-used timestamps, request counts, and a Revoke button that actually works (the v0.26.0 button was a no-op shell). API key rows are clickable; the drawer adapts content based on whether the agent uses OAuth or raw bearer.
+
+Per-client token TTL lands. Hardcoded 1-hour OAuth tokens meant Claude Code's built-in OAuth client (no auto-refresh) hit 401s every hour. New `oauth_clients.token_ttl` column + a Token Lifetime dropdown at register time (1h, 24h, 7d, 30d, 1y, no expiry). Editable from the agent drawer.
+
+Request log gains real teeth. `params` and `error_message` columns on `mcp_request_log`, agent-name resolution threaded through the existing token-verification SELECT (one query, no separate cache), click-to-filter by agent, expandable row detail. Filter parameters use postgres.js tagged-template fragments — no string interpolation, no `sql.unsafe`. The "what just happened on my brain" question is now one click away.
+
+Agent drawer adds a Config Export tab with auth-type-aware snippets for five clients: Claude Code (`read -s` prompt-based default + 2-step curl fallback so client secrets never enter shell history), ChatGPT, Claude.ai Cowork, Cursor (auth-type-aware bearer or OAuth), and Perplexity. ChatGPT/Cowork/Perplexity show an "OAuth client required" message when an API-key agent is selected, with a CTA pointing at the Register OAuth Client modal.
+
+### The numbers that matter
+
+18 fix-up commits on top of 16 PR commits, plus a separate codex pass that caught real bugs five Claude review passes missed (notably `loadApiKeys is not defined` in the Create-API-Key flow). Migration v33 adds the 5 columns the admin dashboard work was already referencing — without it, `gbrain upgrade` left the dashboard in a 503 state and the request log silently empty. Admin React build is now a CI gate so missing-symbol bugs fail before E2E.
+
+| Metric | BEFORE v0.26.3 | AFTER v0.26.3 | Δ |
+|---|---|---|---|
+| Bootstrap-token persistence | localStorage (forever) | never client-side | trust boundary closed |
+| Magic-link URL replay | works until server restart | single-use, ~5min TTL | URL leak limited |
+| Sign-out blast radius | this tab only | all sessions everywhere | truthful button |
+| OAuth token TTL | hardcoded 1h | per-client (1h–no expiry) | configurable |
+| Per-MCP-request DB roundtrip | name lookup query | folded into existing auth SELECT | -1 query/req |
+| Request-log filter SQL | sql.unsafe + manual escape | tagged-template fragments | no injection surface |
+| Admin React build gating | none | CI step before E2E | bugs caught earlier |
+| Schema migrations through v33 | 32 (admin cols missing) | 33 (admin cols present) | dashboard works |
+
+### What this means for operators
+
+Run `gbrain upgrade`. Restart `gbrain serve --http`. Ask your AI agent for the admin login link — it generates a one-time URL, you click, you're in. Close the tab, your session ends. Reopen, ask for a fresh link. No persistent token in your browser. Click Revoke on a misbehaving client and every existing token of theirs is invalid in one round-trip. Click Sign Out Everywhere and every browser tab dies. Watch the request log to see exactly which agents are doing what.
+
+## To take advantage of v0.26.3
+
+**Existing brains: run `gbrain apply-migrations --yes` after upgrade.** The dashboard 503s and the request log silently empties until migration v33 runs (5 new columns: `oauth_clients.token_ttl + deleted_at`, `mcp_request_log.{agent_name, params, error_message}`).
+
+`gbrain upgrade` should chain this automatically. If you're already running `gbrain serve --http`:
+
+1. **Run the migration explicitly:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Restart the server** so the new admin UI ships:
+   ```bash
+   gbrain serve --http
+   ```
+3. **Open `/admin`.** Ask your AI agent for a login link. Your agent reads the bootstrap token from the server's startup output and POSTs to `/admin/api/issue-magic-link` to mint a one-time URL. Click that URL — sets cookie, redirects to dashboard, link dies.
+4. **Verify both auth lanes show up:**
+   - Agents page → both OAuth clients and legacy bearer tokens in one table, click any row for details
+   - Click "+ API Key" or "+ OAuth Client" to register
+   - Request log resolves agent names directly (no per-request DB roundtrip thanks to the threaded JOIN)
+5. **For new agents that need long-lived tokens** (Claude Code, gstack-desktop), pick a Token Lifetime ≥ 30d at register time. Editable from the agent drawer.
+6. **For OAuth Claude Code config snippets:** the default uses `read -s` to prompt for the secret without echoing — secret never enters shell history. The 2-step curl fallback documents the alternative for shells that don't support `read -s`.
+7. **Sign out everywhere** lives in the sidebar footer. One click revokes every active admin session.
+
+If anything misbehaves, file an issue at https://github.com/garrytan/gbrain/issues with `gbrain doctor` output and which step broke.
+
+### Itemized changes
+
+**Schema (`src/core/migrate.ts`, `schema.sql`, `pglite-schema.ts`):**
+- Migration v33 adds 5 columns the admin dashboard work was already using: `oauth_clients.{token_ttl, deleted_at}` + `mcp_request_log.{agent_name, params, error_message}`
+- New index `idx_mcp_log_agent_time` for agent-filtered request-log queries
+- Inline UPDATE backfill of `agent_name` from `oauth_clients.client_name` → `access_tokens.name` → raw `token_name`
+- All ALTERs use `ADD COLUMN IF NOT EXISTS` so re-runs are no-ops
+
+**Admin dashboard (`admin/`):**
+- Bootstrap token never persists in browser JS state (no localStorage / sessionStorage cache)
+- Magic-link login: agent calls `POST /admin/api/issue-magic-link` to mint a one-time nonce URL; redemption rotates in-memory; second click on same URL fails with the styled error page
+- "Sign out everywhere" button revokes every active admin session in one click
+- API Keys + OAuth clients in one unified Agents table; both row types clickable
+- Hide-revoked toggle (defaults on) + empty-state placeholder when filtered result is empty
+- Per-client Token Lifetime dropdown at registration (1h, 24h, 7d, 30d, 1y, no expiry); editable from agent drawer
+- Auth-type-aware Config Export tabs:
+  - Claude Code: `read -s` prompt-based snippet (default) + 2-step curl fallback for OAuth, plain bearer for API keys
+  - Cursor: OAuth discovery URL OR raw bearer in `.cursor/mcp.json` based on auth type
+  - ChatGPT / Claude.ai / Perplexity: render an "OAuth client required" message + CTA on API-key agents
+- Request log: agent-name filter, params + error_message expandable detail, click-to-filter-by-agent
+- Working Revoke Agent button (was a no-op in v0.26.0)
+- Styled error page for expired/consumed magic links — tells operators how to recover
+- DESIGN.md locks in the dashboard design system (Inter + JetBrains Mono, no accent color, semantic-badges-carry-color, left-align)
+- Bug fix: `loadApiKeys()` reference replaced with `loadAgents()` — the Create-API-Key flow was throwing ReferenceError until codex caught it
+
+**Server (`src/commands/serve-http.ts`, `src/core/oauth-provider.ts`):**
+- `POST /admin/api/issue-magic-link` (Bearer auth with bootstrap token) → mints one-time nonce URL with 5-minute TTL
+- `POST /admin/api/sign-out-everywhere` → calls `adminSessions.clear()`, returns `{revoked_sessions: count}`
+- `GET /admin/auth/:nonce` is single-use (consumed nonces tracked in-memory with LRU cap of 1000) — bootstrap token never appears in a URL
+- `crypto.timingSafeEqual` on both `/admin/login` and `/admin/auth/:nonce` hash comparisons
+- Rate-limit `/admin/auth/:nonce` at 10/min/IP (express-rate-limit)
+- `verifyAccessToken` JOINs `oauth_clients` in its existing token SELECT and returns `clientName` on `AuthInfo` — eliminates the per-MCP-request DB roundtrip for log agent-name resolution
+- Request-log filter (`/admin/api/requests`) parameterized via postgres.js tagged-template fragments; `sql.unsafe()` + manual escape pattern removed; dead `paramIdx`/`query`/`params` variables deleted
+- Legacy `access_tokens` path now also returns `clientName = name` for symmetry
+- Ported `coerceTimestamp` helper (postgres-js BIGINT-as-string fix from master v0.26.2) so `test/oauth.test.ts` compiles standalone without needing a master merge
+
+**Tests:**
+- New E2E coverage in `test/e2e/serve-http-oauth.test.ts`:
+  - mcp_request_log new column round-trip (pins migration v33 against silent failure)
+  - Request-log filter SQL-injection probe (regression guard for parameterization)
+  - Per-client TTL flow (register, mint, decode `expires_in`, assert)
+  - Magic-link single-use semantic (nonce works once, fails twice)
+  - Magic-link styled 401 page (Content-Type: text/html, body contains "expired")
+  - agent_name resolution path
+  - register-client missing-name input validation
+- Renamed describe header to `serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)`
+
+### For contributors
+
+- Admin React build is a CI gate now: `scripts/check-admin-build.sh` runs `cd admin && bun install && bun run build` alongside the typecheck step in `bun run test`. Catches missing-symbol bugs (the kind codex caught) before they reach E2E. `GBRAIN_SKIP_ADMIN_BUILD=1` is the inner-loop escape hatch; production CI must not set it.
+- E2E test cleanup uses CLI `auth revoke-client` per registered `clientId` (with `dcrClientIds[]` accumulator for DCR-registered clients). The earlier `LIKE 'e2e-%'` pattern-matching cleanup was replaced — direct ID-based cleanup is safer (no risk of nuking a non-test client whose name happens to start with `e2e-`).
+- `scripts/check-no-legacy-getconnection.sh` allow-list adds `src/commands/integrity.ts` (pre-existing `db.getConnection()` call from v0.22.16; PR 1 refactors to accept engine).
+- Full plan + codex review pass artifacts live at `~/.claude/plans/check-this-out-and-breezy-forest.md` (5 review passes + codex outside-voice + 14 D-decisions documented).
+
+## [0.26.2] - 2026-05-03
+
+## **MCP fix-wave: every postgres-as-string OAuth bug, killed at the boundary.**
+## **Bigger guarantees: `revoke-client` lands as a real CLI, NULL expires_at is treated as expired, corrupt rows fail loud at the row-read boundary instead of skating past validation.**
+
+`gbrain serve --http` now does the right thing on every postgres-driver-as-string edge case the v0.26.1 hot-fix didn't reach. The same bug class that broke `client_credentials` token validation in production (postgres.js with `prepare: false` returns BIGINT columns as strings, and the MCP SDK's bearerAuth checks `typeof === 'number'`) hides at four other read sites in `src/core/oauth-provider.ts`. Two of those flow into the RFC 7591 §3.2.1 Dynamic Client Registration response, where strict OAuth clients reject string timestamps and the registration silently fails. v0.26.2 closes the bug class with a single named helper at the boundary.
+
+The shape changed during eng + outside-voice review. The first draft normalized rows with inline `Number(...)` calls, but a `Number('foo') → NaN` slipping through is fail-OPEN, not fail-closed: `NaN < now` is `false`, so the expired-token branch is skipped and the SDK gets `expiresAt: NaN` as if the token were valid. Codex flagged this. The shipped helper, `coerceTimestamp()`, throws on non-finite input — corrupt rows fail loud at the boundary instead of riding through token validation.
+
+Plus: `gbrain auth revoke-client <client_id>` lands as a first-class CLI subcommand. Schema-level `ON DELETE CASCADE` on `oauth_tokens.client_id` and `oauth_codes.client_id` purges every active token and authorization code in a single atomic transaction. The matching v0.26.1 E2E test had been calling this subcommand all along — silently failing because the subcommand didn't exist. v0.26.2 makes the cleanup actually work.
+
+### The numbers that matter
+
+5 string-vs-number sites identified in the original v0.26.1 audit; 5 fixed in v0.26.2. 4 new tests covering surfaces v0.26.1 didn't reach: real DCR `/register` HTTP-level response shape, real CLI subprocess invocation of `revoke-client`, NULL `expires_at` semantics, cascade-delete contract.
+
+| Metric | BEFORE v0.26.2 | AFTER v0.26.2 | Δ |
+|---|---|---|---|
+| Sites where postgres-as-string can break OAuth | 4 latent (1 fixed in v0.26.1) | 0 | bug class closed |
+| `Number(...)` on corrupt row | flows through as NaN (fail-OPEN) | helper throws (fail-CLOSED) | loud failure |
+| `gbrain auth revoke-client` | doesn't exist | first-class CLI subcommand | +1 |
+| E2E afterAll cleanup | silently failing | actually deletes the test client | reliable |
+| DCR `/register` response timestamps | strings under `prepare: false` | RFC 7591 §3.2.1 numbers | spec-compliant |
+
+### What this means for operators
+
+Strict OAuth clients (Claude Code, Cursor) connecting via `gbrain serve --http` get spec-compliant `client_id_issued_at` numbers in their DCR responses. Operators get a real `revoke-client` subcommand and CASCADE-driven token purge. CI runs no longer leak orphan `gbrain_cl_*` rows on every E2E pass. Run `gbrain upgrade`. No schema migration. No manual step.
+
+### For contributors
+
+The boundary helper `coerceTimestamp` is intentionally module-private to `src/core/oauth-provider.ts` and not promoted to `src/core/utils.ts`. Codex review flagged repo-wide BIGINT precision-loss risk for a generic helper; the OAuth surface is bounded and well-understood, the rest of the repo isn't. Promote later if the pattern recurs.
+
+### Known caveats
+
+Hard-deleting a client orphans its entries in `mcp_request_log` (the table stores `token_name` TEXT with no FK). The admin UI's request-log view will show those entries with the literal token_name and no client correlation. Acceptable for a fix-wave; v0.27 can add a `[revoked]` badge or `LEFT JOIN`-aware rendering if forensics needs grow.
+
+## To take advantage of v0.26.2
+
+`gbrain upgrade` is sufficient. No schema migration. No manual step.
+
+```bash
+gbrain upgrade
+gbrain --version  # should print 0.26.2
+```
+
+If you operate `gbrain serve --http` and have OAuth clients registered, no client-side action is needed. Existing tokens keep working. Rolling token rotation continues to work. The new `gbrain auth revoke-client <client_id>` subcommand is available for cleanup.
+
+### Itemized changes
+
+#### OAuth bug-class fixes
+- **`coerceTimestamp()` boundary helper** in `src/core/oauth-provider.ts`. Throws on non-finite input (NaN/Infinity); returns undefined for SQL NULL so callers decide NULL semantics explicitly. Doc comment names the three load-bearing pieces: postgres `prepare: false` BIGINT-as-string behavior, MCP SDK's `typeof === 'number'` bearerAuth check, RFC 7591 §3.2.1 JSON-number requirement.
+- **5 call sites refactored** to use the helper:
+  - `getClient` (L112, L113): `client_id_issued_at` and `client_secret_expires_at` now flow through the helper, so DCR `/register` responses are RFC-compliant numbers.
+  - `exchangeRefreshToken` (L274): NULL `expires_at` is treated as expired (fail-closed). Schema permits NULL on `oauth_tokens.expires_at`; corrupt rows can no longer ride past validation.
+  - `verifyAccessToken` (L296, L303): same NULL-as-expired contract for access tokens; the SDK's bearerAuth gets a guaranteed `typeof === 'number'` value.
+- **Removed inline `Number(...)` from L303** introduced in v0.26.1; replaced with the helper-narrowed value from the L296 guard for consistency. Behavior unchanged.
+
+#### New CLI subcommand
+- **`gbrain auth revoke-client <client_id>`** lands in `src/commands/auth.ts`. Atomic `DELETE...RETURNING` on `oauth_clients`, FK CASCADE purges `oauth_tokens` and `oauth_codes`. Prints client name + cascade confirmation. `process.exit(1)` on no-such-client (idempotent: re-running on the same id produces the same exit-1 message).
+- Help text + router case wired alongside `register-client`.
+
+#### Tests
+- `test/oauth.test.ts`: 5 unit cases for `coerceTimestamp` (null/undefined/string/number/throw-on-NaN), NULL-`expires_at`-as-expired contract test, cascade-delete contract test.
+- `test/e2e/serve-http-oauth.test.ts`: real DCR `/register` HTTP-level response-shape test (asserts `typeof body.client_id_issued_at === 'number'` over the wire, not just internal-store shape); real CLI subprocess test for `revoke-client` (registers → mints token → revokes via execSync → asserts token rejected at `/mcp` → asserts re-run exits 1).
+- E2E `afterAll` cleanup: now guarded on `clientId` (won't throw if `beforeAll` failed before registration); cleanup errors surface to stderr without throwing so real test failures aren't masked. Tracks DCR-registered clients alongside the manual one.
+- Server fixture: `--enable-dcr` added so `/register` is reachable in the DCR test.
+
+#### Mechanics
+- `VERSION` → `0.26.2`. `package.json` → `0.26.2`. `bun.lock` refreshed.
+
+### Credits
+
+This branch was driven by an audit of PR #577 (v0.26.1). Codex independent review surfaced 5 factual errors and 7 design gaps the in-house eng review had cleared. The shipped scope is tighter and more honest than the original D1 plan — the outside voice was the load-bearing input.
+
+## [0.26.1] - 2026-05-03
+
+## **MCP bearer-auth hot-fix: `client_credentials` tokens stop being rejected at `/mcp`.**
+
+A three-bug fix-wave landed on master as PR #577 to unblock production OAuth connections. Every token minted via `client_credentials` was being rejected at `/mcp` with `HTTP 401 {"error":"invalid_token","error_description":"Token has no expiration time"}`. Token issuance worked; validation failed because the postgres-js driver with `prepare: false` returns BIGINT columns as strings and the MCP SDK's bearerAuth middleware checks `typeof authInfo.expiresAt === 'number'`.
+
+Found in production connecting Claude Code through Caddy/Tailscale to `gbrain serve --http`.
+
+### What shipped
+
+- **`Number(row.expires_at)` cast** in `verifyAccessToken` (`src/core/oauth-provider.ts:303`) so the SDK gets a JS number, not a postgres string.
+- **OAuth metadata interceptor middleware** in `src/commands/serve-http.ts:164-175`. The MCP SDK hardcodes `grant_types_supported: ['authorization_code', 'refresh_token']` in its `.well-known/oauth-authorization-server` response. The middleware patches `res.json` to append `client_credentials` so RFC-conformant clients (Claude Code, Cursor) auto-discover the flow.
+- **Express 5 compat fixes** in `src/commands/serve-http.ts`:
+  - `app.set('trust proxy', 'loopback')` so reverse-proxy deployments (Caddy on localhost, Tailscale) don't crash `express-rate-limit` with `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR`. Restricts proxy trust to localhost only — does NOT trust arbitrary `X-Forwarded-For`.
+  - `/admin/{*path}` (Express 5 named-wildcard syntax) instead of the bare `/admin/*` Express 5 dropped.
+
+### Tests
+
+50 cases / 201 assertions including a real-Postgres E2E (`test/e2e/serve-http-oauth.test.ts`) that spawns a subprocess server, registers an OAuth client via the CLI, mints tokens via client_credentials, and exercises the full MCP JSON-RPC pipeline end-to-end.
+
+### Process note
+
+PR #577 shipped its three fixes but did not bump `VERSION`, `package.json`, or `CHANGELOG.md`. v0.26.2 retroactively writes this v0.26.1 entry so the changelog matches the commit history. The /ship workflow's version idempotency check (Step 12) will catch drifts like this in the future.
+
+### Credits
+
+Co-authored by Wintermute. Found in production. Three bugs, 22 lines, real fix.
+
+## [0.26.0] - 2026-04-25
+
+## **Multi-agent MCP is real. OAuth 2.1, HTTP server, React admin dashboard. Ship once, every AI client connects.**
+## **`gbrain serve --http` starts a production-grade OAuth server with embedded admin UI. Zero external dependencies.**
+
+This is GBrain as an organizational knowledge layer. Multiple AI agents, authenticated with scoped tokens, hitting the same brain over the wire. Perplexity Computer writes research. Claude queries for context. ChatGPT calls tools. Every request authenticated, every scope enforced, every action logged. One binary, zero infrastructure.
+
+OAuth 2.1 via the MCP SDK's built-in infrastructure (`mcpAuthRouter` + `OAuthServerProvider`). Full spec compliance: client credentials for machine-to-machine (Perplexity, Claude), authorization code with PKCE for browser-based clients (ChatGPT), token refresh with rotation, dynamic client registration (default off behind `--enable-dcr` flag), token revocation, protected resource metadata. 30 operations tagged with `scope: 'read' | 'write' | 'admin'`, enforced in the HTTP transport before dispatch. `sync_brain` and `file_upload` are `localOnly` ... admin-scoped AND excluded from HTTP, so remote agents cannot reach local filesystem surface area.
+
+React admin dashboard baked into the binary. Seven screens designed through Steve Krug's "Don't Make Me Think" lens: login, dashboard with live activity SSE feed, agents table with sparklines, register agent modal with scope checkboxes, credentials reveal with copy buttons and JSON download, filterable request log with pagination, agent detail drawer with per-client config export. Dark theme, JetBrains Mono for data, Inter for UI. Dense utilitarian layout. HTTP-only SameSite=Strict cookie auth with bootstrap token printed to the terminal on first start. 65KB gzipped.
+
+### The numbers that matter
+
+7 bisectable commits on this branch before the merge. 27 dedicated OAuth tests, all pass. Full suite: 2068 pass / 18 pre-existing master timeouts (unchanged from the merge). Typecheck clean.
+
+| Metric | BEFORE v0.26 | AFTER v0.26 | Δ |
+|---|---|---|---|
+| Auth mechanism | static bearer tokens | OAuth 2.1 + legacy fallback | protocol-compliant |
+| Concurrent agents | 1 (stdio only) | many (HTTP) | unbounded |
+| ChatGPT support | impossible (needs OAuth + PKCE) | native | unblocked |
+| Admin surface | CLI-only | /admin dashboard | +7 screens |
+| Scoped operations | 0 | 30 (all) | +30 |
+| New tests | ... | 27 (oauth.test.ts) | +27 |
+
+### What this means for agents
+
+`gbrain auth register-client perplexity --grant-types client_credentials --scopes "read write"` gives you credentials. `gbrain serve --http --port 3131` starts the server, prints the admin bootstrap token. Open `localhost:3131/admin`, paste the token, watch the live feed. Every Perplexity search, every Claude query, every ChatGPT tool call streams into the dashboard in real time. You see who's connected, what they're doing, and where the errors are. The thing actually works, this isn't a stepping stone, it's the production surface.
+
+## To take advantage of v0.26.0
+
+`gbrain upgrade` should run the schema migration automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
 
 1. **Run the orchestrator manually:**
    ```bash
@@ -85,13 +330,27 @@ doctor` warns about an incomplete migration:
 
 6. **If any step fails or the numbers look wrong,** please file an issue:
    https://github.com/garrytan/gbrain/issues with:
+2. **Verify OAuth tables exist:**
+   ```bash
+   gbrain doctor
+   ```
+3. **Register your first OAuth agent:**
+   ```bash
+   gbrain auth register-client perplexity --grant-types client_credentials --scopes "read write"
+   ```
+4. **Start the HTTP server:**
+   ```bash
+   gbrain serve --http --port 3131
+   ```
+   The terminal prints the admin bootstrap token. Open `http://localhost:3131/admin` and paste it to access the dashboard.
+5. **If any step fails,** please file an issue: https://github.com/garrytan/gbrain/issues with:
    - output of `gbrain doctor`
    - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
    - which step broke
 
 ### Itemized changes
 
-#### Schema (migrations v32 + v33)
+#### Schema (migrations v34 + v35)
 
 - **takes table** — `(page_id, row_num)` natural unique key + `id BIGSERIAL`
   PK; full claim metadata; resolution metadata (`resolved_at`,
@@ -154,6 +413,209 @@ doctor` warns about an incomplete migration:
   gracefully.
 - **Auto-think + drift phases deferred**: opt-in dream-cycle phases for
   autonomous belief evolution. Land in v0.28.x; no schema migration needed.
+**Security hardening (post-/cso pass):**
+- Auth code exchange + refresh token rotation now use atomic `DELETE...RETURNING` instead of SELECT-then-DELETE. The earlier non-atomic pattern let two concurrent token requests with the same auth code both succeed, issuing two valid token pairs from one code (RFC 6749 §10.5 violation). Same shape applied to refresh tokens (RFC 6749 §10.4 detection of stolen tokens depends on second-use failure). New regression tests fire 10 concurrent requests with the same code/refresh and assert exactly one succeeds.
+- `pgArray()` now escapes commas, braces, quotes, and backslashes inside array elements. The earlier no-escape join could be exploited (with `--enable-dcr` on) to smuggle a second redirect_uri into a registered client's array, enabling auth code redirection to an attacker-controlled domain.
+- Dynamic Client Registration now enforces RFC 6749 §3.1.2.1: every `redirect_uri` must be `https://` or loopback (`http://localhost`, `http://127.0.0.1`). Plaintext non-loopback `http://` is rejected at registration time.
+- `serve --http` now accepts `--public-url URL` to set the OAuth issuer in discovery metadata. Required for production deployments behind reverse proxies, ngrok tunnels, or any non-loopback URL — the issuer claim must match the discovery URL clients hit (RFC 8414 §3.3).
+- `cookie-parser` middleware now wired in. The admin dashboard auth was silently broken in the original v0.22 ship: `/admin/login` set the cookie, but every subsequent admin API call returned 401 because Express 5 has no built-in cookie parsing. Direct dep added: `cookie-parser@^1.4.7`.
+
+**OAuth 2.1 (new):**
+- `src/core/oauth-provider.ts` (404 lines) ... `GBrainOAuthProvider` implementing MCP SDK's `OAuthServerProvider` + `OAuthRegisteredClientsStore` interfaces. Backed by raw SQL (works on both PGLite and Postgres).
+- All tokens + client secrets SHA-256 hashed before storage. Auth codes single-use with 10-minute TTL. Refresh tokens rotate on use. Client credentials grant issues access token only (no refresh per RFC 6749 §4.4.3).
+- Legacy `access_tokens` fallback: pre-v0.26 bearer tokens continue working, grandfathered as `read+write+admin` scopes.
+- `sweepExpiredTokens()` runs on startup wrapped in try/catch ... server boots even if the sweep fails.
+- `hashToken()` and `generateToken()` extracted to `src/core/utils.ts` (DRY across auth surfaces).
+
+**HTTP server (new):**
+- `src/commands/serve-http.ts` ... Express 5 server with `mcpAuthRouter` + custom client_credentials handler (SDK's token endpoint throws `UnsupportedGrantTypeError` for CC; our handler runs BEFORE the router, falls through to SDK for auth_code/refresh).
+- Rate limiting on `/token` (50 requests / 15 min per IP via `express-rate-limit`).
+- Admin dashboard served from `admin/dist/` via Express static + SPA fallback.
+- SSE endpoint at `/admin/events` broadcasts every MCP request to connected admin browsers.
+- CORS: `/mcp` + `/token` open, `/admin` same-origin.
+- Startup logging prints port, engine type, registered client count, DCR status, issuer URL, admin bootstrap token.
+
+**Schema (new tables):**
+- `oauth_clients` (client_id, hashed secret, grant_types array, scope, redirect_uris, timestamps)
+- `oauth_tokens` (token hash, type=access|refresh, client_id, scopes, expires_at, resource)
+- `oauth_codes` (code hash, client_id, scopes, PKCE challenge, redirect_uri, state, expires_at)
+- Composite index on `mcp_request_log(created_at, token_name)` for the admin dashboard's time-range queries.
+- Migration v30 (`oauth_infrastructure`) creates everything idempotently. PGLite schema updated to include auth infrastructure because `serve --http` makes it network-accessible.
+
+**Operation contract:**
+- `Operation.scope?: 'read' | 'write' | 'admin'` ... added to interface, annotated on all 30 operations plus 11 new Minion ops via per-op audit (not derived from `mutating` flag).
+- `Operation.localOnly?: boolean` ... marks operations rejected over HTTP. `sync_brain`, `file_upload`, `file_list`, `file_url` all `admin + localOnly`.
+- `OperationContext.auth?: AuthInfo` ... threaded through HTTP dispatch for scope enforcement.
+
+**React admin dashboard (new `admin/`):**
+- Vite + React 19, TypeScript, 65KB gzipped.
+- 7 screens: Login, Dashboard (metrics + SSE feed + token health), Agents (sortable table + sparklines + Register button), Register (modal with scope checkboxes), Credentials (full-screen modal with Copy + Download JSON + yellow warning), Request Log (filterable paginated table), Agent Detail (drawer with Details/Activity/Config Export tabs + Revoke).
+- Design tokens: `#0a0a0f` bg, Inter for UI, JetBrains Mono for data, 4-32px spacing scale, rounded pill badges.
+- Interaction states: empty state CTAs, SSE reconnection messaging, credential-reveal warning ("Save this secret now. It will not be shown again.").
+- Design lens: Steve Krug "Don't Make Me Think" ... zero happy talk, mindless choices, scannable tables, billboard-speed comprehension.
+
+**CLI:**
+- `gbrain serve --http [--port 3131] [--token-ttl 3600] [--enable-dcr] [--public-url URL]` ... new HTTP transport alongside existing stdio `gbrain serve`.
+- `gbrain auth register-client <name> --grant-types <types> --scopes <scopes>` ... manual OAuth client registration.
+- Existing `auth create/list/revoke` kept for backward compatibility.
+
+**Dependencies:**
+- `express@^5.1.0`, `express-rate-limit@^7.5.0`, `cors@^2.8.5`, `cookie-parser@^1.4.7` as direct deps.
+- `@modelcontextprotocol/sdk` pinned to exact `1.29.0` (was `^1.0.0`).
+- `@types/express`, `@types/cors`, `@types/cookie-parser` as dev deps for typecheck.
+
+**Tests:**
+- `test/oauth.test.ts` ... 34 test cases covering provider: register, getClient, client_credentials exchange, auth_code flow with PKCE, refresh rotation, verifyAccessToken (OAuth + legacy fallback), revokeToken, sweepExpiredTokens, scope annotations on all 30 operations. Plus the post-/cso security-fix regressions: 10-concurrent auth code exchange (only 1 wins), 10-concurrent refresh rotation (only 1 wins), redirect_uri HTTPS-or-loopback gate, and pgArray comma-element round-trip (1 element in → 1 element out).
+
+
+
+
+
+## [0.25.1] - 2026-05-01
+
+## **Your brain can now read books with you. Nine new skills land at once.**
+## **Plus: skillpack gets a real uninstall, the privacy guard learns new patterns.**
+
+`gbrain book-mirror` is the flagship. Hand it a book and a slug, and the agent fans out one read-only Opus subagent per chapter, assembles a personalized two-column analysis (left column preserves the chapter's actual content with stories and frameworks intact, right column maps every idea to your actual life using your words from the brain), and writes it as one operator-trust `put_page` to `media/books/<slug>-personalized.md`. Twenty-chapter book runs ~$6 at Opus. Subagents have read-only `allowed_tools: ['get_page', 'search']`, so untrusted EPUB content cannot prompt-inject any people page. The CLI prints a cost estimate and refuses to spend in non-TTY without `--yes`.
+
+Eight more skills ship alongside book-mirror: `article-enrichment` turns raw article dumps into structured pages with verbatim quotes; `strategic-reading` reads a book through one specific problem-lens with a do/avoid/watch-for playbook; `concept-synthesis` deduplicates thousands of concept stubs into a tiered intellectual map (T1 Canon to T4 Riff); `perplexity-research` does brain-augmented web research that focuses on the delta between what the brain knows and what's online now; `archive-crawler` mines personal file archives for high-value content within an explicit `gbrain.yml` allow-list; `academic-verify` traces a research claim through publication to raw data to replication; `brain-pdf` renders any brain page to publication-quality PDF; `voice-note-ingest` captures audio with exact-phrasing preservation and routes it to the right brain directory.
+
+`gbrain skillpack uninstall <name>` lands as a real CLI subcommand. Inverse of install, symmetric data-loss posture. Refuses if the slug isn't in the managed block's cumulative-slugs receipt (so it won't nuke a row you hand-added). Refuses if any installed file diverges from the bundle (you've edited it locally). `--overwrite-local` is the escape hatch, same as install. Atomic refusal — if any file would be blocked, the whole uninstall refuses before any unlink fires. No half-uninstalled state.
+
+Three existing skills got drift-backports from the maintainer's private fork: `citation-fixer` resolves broken tweet/post references to deterministic `x.com/handle/status/id` URLs via X API; `testing` splits into skill conformance + project test-suite health with regression-aware classification (REGRESSION / STALE / FLAKE / NEW / INFRA); `cross-modal-review` adds explicit gating ("when to invoke" vs "do NOT invoke") and a `/codex review` handoff for diff review.
+
+The privacy CI guard now also blocks `/data/brain/` and `/data/.openclaw/` literals. Seven historical files are allow-listed (frozen migration files, test fixtures, env-var fallback defaults).
+
+### The numbers that matter
+
+Counted against this branch's diff vs master and against the local test suite at the v0.25.1 cut:
+
+| Metric | BEFORE v0.25.1 | AFTER v0.25.1 | Δ |
+|---|---|---|---|
+| Skills shipped in `openclaw.plugin.json` | 25 | 34 | +9 |
+| New CLI commands | (existing) | `gbrain book-mirror`, `gbrain skillpack uninstall` | +2 |
+| Skills with drift-backport from upstream | 0 | 3 (citation-fixer, testing, cross-modal-review) | +3 |
+| Privacy CI guard banned-pattern coverage | 1 (fork-name literal) | 3 (+ `/data/brain/`, `/data/.openclaw/`) | +2 |
+| `gbrain skillpack` subcommands | 4 (list, install, diff, check) | 5 (+ uninstall) | +1 |
+| Skill-routing trust regression detector | 0 | media-ingest ↔ book-mirror routing-eval adversarial intents | +1 |
+| Filing-rule directories sanctioned | 12 | 16 (+ ideas, research, original, voice-note) | +4 |
+| Atomic-refusal contract on installer rollback | implicit (buggy on uninstall) | tested + enforced (`test/skillpack-uninstall.test.ts`) | locked |
+| Lines of new TypeScript src/ shipped | 0 | ~1,100 (book-mirror.ts + skillpack uninstall + archive-crawler-config + harness) | +1100 |
+| Tests added (unit + harness self-test) | (existing) | 62 (book-mirror, skillpack-uninstall, archive-crawler-config, cli-pty-runner) | +62 |
+
+Cross-model review trail: **Eng Review (R1 + R2)** + **Codex outside voice** with 15 user decisions captured (D1–D15), 0 unresolved. Codex caught the four highest-impact architectural mistakes the eng review missed: book-mirror's earlier `allowedSlugPrefixes: ['media/books/*', 'people/*']` design was a security regression; the fan-out runtime was missing infrastructure rather than the plan's assumed primitive; uninstall's content-hash guard was incomplete on user-modified files; archive-crawler's "trust the prompt" was not a control. All four were addressed before code landed.
+
+### What this means for builders
+
+Existing brains: no schema migration. `gbrain upgrade` does it.
+
+The flagship: `gbrain book-mirror --chapters-dir <path> --slug <slug>` once you've extracted the chapters (the skill walks you through EPUB and PDF extraction via BeautifulSoup4 / `pdftotext -layout`). The CLI is the trusted runtime; the skill is the orchestration prose.
+
+`gbrain skillpack uninstall <name>` if you ever want to remove a skill from your workspace. It refuses to do anything that would lose your edits.
+
+`archive-crawler` requires `archive-crawler.scan_paths:` set in `gbrain.yml` before it'll run. That's deliberate. Three-line allow-list, one-time pain, never wakes up at 3am wondering if the agent ingested your tax PDFs.
+
+The 9 new skills are all available immediately after `gbrain skillpack install <name>` (or `install --all`).
+
+## To take advantage of v0.25.1
+
+`gbrain upgrade` does this automatically. To verify:
+
+1. **Binary version:**
+   ```bash
+   gbrain --version   # expect: gbrain 0.25.1
+   ```
+2. **Book-mirror is registered:**
+   ```bash
+   gbrain book-mirror --help 2>&1 | grep "media/books/"
+   # expect: lines describing the trust contract
+   ```
+   (The CLI requires DB connection even for `--help` due to a pre-existing dispatch order; if you see "Cannot connect to database" your install is fine, the help text just needs DATABASE_URL set or a local PGLite brain.)
+3. **Skillpack uninstall is wired:**
+   ```bash
+   gbrain skillpack uninstall --help 2>&1 | grep "Inverse of install"
+   ```
+4. **Archive-crawler safety gate (only matters if you install it):**
+   ```bash
+   # Without gbrain.yml allow-list, the skill instructs the agent to refuse:
+   cat skills/archive-crawler/SKILL.md | grep "scan_paths"
+   ```
+5. **If anything fails,** file an issue at https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor` and which step broke.
+
+No schema migration. Existing brains work unchanged.
+
+### Itemized changes
+
+#### Added (skills)
+
+- **`skills/book-mirror/`** — flagship. Two-column personalized chapter-by-chapter book analysis. SKILL.md ports the upstream original to pure gbrain idiom; CLI lives at `src/commands/book-mirror.ts`.
+- **`skills/article-enrichment/`** — transforms raw article dumps into structured pages with verbatim quotes, key insights, why-it-matters.
+- **`skills/strategic-reading/`** — reads a book / article / case study through one specific problem-lens; produces a do / avoid / watch-for playbook with short / medium / long-term recommendations.
+- **`skills/concept-synthesis/`** — 4-phase pipeline (dedup → tier → synthesize T1/T2 → cluster) over raw concept stubs; output is a curated intellectual fingerprint at `concepts/README.md`.
+- **`skills/perplexity-research/`** — sends brain context as part of the Perplexity prompt so the search focuses on what's NEW vs already-known. Output structure: Executive Summary + Key New Developments + Confirming Signals + Contradictions or Updates + Recommended Brain Updates + Citations.
+- **`skills/archive-crawler/`** — universal archivist for personal file archives (Dropbox / B2 / Gmail-takeout / local-mount / hard-drive-dump). REFUSES to run unless `archive-crawler.scan_paths:` is set in `gbrain.yml`.
+- **`skills/academic-verify/`** — verifies a research claim by tracing it through publication → methodology → raw data → independent replication. Routes through perplexity-research as the actual web-search engine; produces a verdict-shaped brain page (verified / partial / unverifiable / misattributed / retracted).
+- **`skills/brain-pdf/`** — generates publication-quality PDFs from any brain page via the gstack `make-pdf` binary. Strips frontmatter, sanitizes emoji, applies running headers + page numbers.
+- **`skills/voice-note-ingest/`** — ingests voice notes with exact-phrasing preservation (never paraphrased). 7-step decision tree routes to originals / concepts / people / companies / ideas / personal / voice-notes.
+
+#### Added (post-install advisory — v0.25.1 DX)
+
+- **`src/core/skillpack/post-install-advisory.ts`** (~209 lines). Every `gbrain init` and `gbrain post-upgrade` now ends by printing an agent-readable advisory listing the v0.25.1 recommended skills the workspace hasn't installed yet. The advisory tells the agent EXPLICITLY: ask the user before installing; print the exact `gbrain skillpack install --all` (or per-skill) command if they say yes. Renders to stderr so stdout stays clean for `--json` output. No-op when every recommended skill is already installed (no nag on repeated `gbrain upgrade` runs). Tests: `test/post-install-advisory.test.ts` (10 cases).
+  - Why this design instead of an interactive TTY prompt: gbrain users typically interact through their host agent, not the gbrain CLI directly. The agent reads command output. So the advisory is structured for agent consumption: `ACTION FOR THE AGENT` block, explicit `Ask the user explicitly`, exact commands, `Do NOT install without asking. The user owns this decision.`
+  - Wired into both `src/commands/init.ts` (PGLite + Postgres paths) and `src/commands/upgrade.ts` (`runPostUpgrade` after migrations apply).
+
+#### Added (CLI)
+
+- **`gbrain book-mirror`** — `src/commands/book-mirror.ts` (~540 lines). CLI submits N read-only subagent jobs per chapter, waits via `waitForCompletion`, reads each child's `job.result`, assembles markdown itself, writes one operator-trust `put_page` to `media/books/<slug>-personalized.md`. Cost-estimate prompt before launching; refuses to spend in non-TTY without `--yes`. Idempotency keys per chapter for retry-friendly re-runs. Partial-failure handling assembles the page with completed chapters and a `## Failed chapters` section listing retries needed.
+- **`gbrain skillpack uninstall <name>`** — `src/commands/skillpack.ts` + `src/core/skillpack/installer.ts:applyUninstall` (~250 lines). Symmetric to install. Atomic refusal: pre-scans all files for divergence; refuses BEFORE any unlink if anything is blocked. `--overwrite-local` escape hatch. Drops the slug from `cumulative-slugs` receipt; preserves other installed skills' rows + user-added unknown rows (with stderr warning).
+
+#### Added (filing-doctrine update)
+
+- **`skills/_brain-filing-rules.md`** — carved out `media/<format>/<slug>` as a sanctioned exception for sui-generis synthesized output (one-of-one to a single source like a personalized book mirror). The "file by primary subject, not by format" rule still applies to raw ingest.
+- **`skills/_brain-filing-rules.json`** — added 4 new directory kinds: `idea` (ideas/), `research` (research/), `original` (originals/), `voice-note` (voice-notes/). Plus 2 synthesis-output kinds for `media/books/` and `media/articles/`.
+- **`skills/media-ingest/SKILL.md`** — refined the format-based-filing anti-pattern callout to clarify that the anti-pattern is for raw ingest only; one-of-one synthesis output may use `media/<format>/`.
+
+#### Added (test infrastructure)
+
+- **`test/helpers/cli-pty-runner.ts`** — generic PTY harness ported from gstack (~470 lines). Used by the smoke test E2E; future-proofs interactive CLI commands.
+- **`test/cli-pty-runner.test.ts`** — 24 cases pinning the harness primitives.
+
+#### Added (CI guard)
+
+- **`scripts/check-privacy.sh`** extended with `BANNED_PATHS` for `/data/brain/` and `/data/.openclaw/`. 7 historical files allow-listed.
+
+#### Added (config schema)
+
+- **`src/core/archive-crawler-config.ts`** (~263 lines) + **`test/archive-crawler-config.test.ts`** (19 tests). `loadArchiveCrawlerConfig`, `normalizeAndValidateArchiveCrawlerConfig`, `isPathAllowed`. Mirrors the storage-config.ts parsing pattern.
+
+#### Drift backports (3 existing skills updated)
+
+- **`skills/citation-fixer/SKILL.md`** (1.0 → 1.1) — adds tweet/post URL resolution via X API. 5-step pipeline.
+- **`skills/testing/SKILL.md`** (1.0 → 1.1) — splits into skill conformance + project test-suite health with regression-aware classification.
+- **`skills/cross-modal-review/SKILL.md`** (1.0 → 1.1) — adds "When to invoke" gating and `/codex review` handoff.
+
+#### Bug fix (during testing)
+
+- **`applyUninstall` atomic refusal** — discovered while writing `test/skillpack-uninstall.test.ts`. The original implementation interleaved D11 hash check + unlink in the same loop, so a divergence on file 5/N would leave files 1..4 already gone. Now: pre-scan all files for divergence; refuse loudly BEFORE any filesystem mutation. The test was written with the contract in mind; the implementation lied about the contract; the lie surfaced immediately.
+
+#### Tests
+
+- **`test/book-mirror.test.ts`** — 9 cases.
+- **`test/skillpack-uninstall.test.ts`** — 10 cases.
+- **`test/archive-crawler-config.test.ts`** — 19 cases.
+- **`test/cli-pty-runner.test.ts`** — 24 cases.
+- 62 new tests total. All pass; existing 90+ skillpack-related tests continue to pass.
+
+#### Deferred to v0.26+
+
+- **`test/e2e/skill-smoke-openclaw.test.ts`** — full interactive openclaw drive via the PTY harness, opt-in via `EVALS=1 EVALS_TIER=skills`. Scaffolded but not landed.
+- **`gbrain skillpack uninstall --all`** — current shape is single-arg; multi-skill uninstall via `install --all` from a pruned bundle still works as the canonical path.
+- **Empty-parent-dir pruning on uninstall** — current behavior leaves empty `skills/<slug>/` directories. Cosmetic; deferred.
+- **LLM tie-break layer for routing-eval** — the routing-miss warnings on the new skills are real; the structural layer doesn't substring-match natural-paraphrased intents. The `--llm` flag stays a placeholder per v0.24.0.
+
+### Cross-model review credit
+
+This release ran two rounds of `/plan-eng-review` plus `/codex` outside voice, capturing 15 user decisions. Codex caught the four most consequential architectural mistakes the eng review missed (read the plan file's GSTACK REVIEW REPORT for the full audit trail). The atomic-refusal bug in applyUninstall was caught by the test for the contract — the test was written with the contract in mind, the implementation lied about the contract, and the lie surfaced immediately. That's the cross-model loop working.
 ## [0.25.0] - 2026-04-26
 
 ## **Contributors can now benchmark retrieval changes against real captured queries before merging.**

@@ -1073,12 +1073,15 @@ export const MIGRATIONS: Migration[] = [
     },
     sql: '',
   },
-  // NOTE: v32 + v33 follow v31 (v0.25 eval_capture_tables) chronologically.
-  // Originally v31/v32 in the v0.28 branch, renumbered to v32/v33 after
-  // master shipped v0.25 (which claimed v31 first). Runtime sort by version
-  // ascending means source-order doesn't matter.
+  // NOTE: v34 + v35 are the v0.28 takes migrations. Renumbered twice during
+  // the long-lived v0.28 branch as master shipped:
+  //   v0.28 originally targeted v31/v32
+  //   master v0.25 claimed v31 (eval_capture_tables) → renumbered to v32/v33
+  //   master v0.26 claimed v32 (oauth_infrastructure) and v33
+  //     (admin_dashboard_columns_v0_26_3) → renumbered to v34/v35
+  // Runtime sort by version ascending means source-order doesn't matter.
   {
-    version: 32,
+    version: 34,
     name: 'takes_and_synthesis_evidence',
     // v0.28: typed/weighted/attributed claims ("takes") + synthesis provenance.
     // Spec: docs/designs (CEO plan) + plan file. Schema decisions:
@@ -1201,7 +1204,7 @@ export const MIGRATIONS: Migration[] = [
     },
   },
   {
-    version: 33,
+    version: 35,
     name: 'access_tokens_permissions',
     // v0.28: per-token allow-list for takes visibility (Codex P0 #3 partial fix).
     // The complementary fix (chunker strips fenced takes content from page chunks
@@ -1348,6 +1351,112 @@ export const MIGRATIONS: Migration[] = [
       `,
     },
     sql: '',
+  },
+  {
+    version: 32,
+    name: 'oauth_infrastructure',
+    // v0.26 OAuth 2.1 tables for `gbrain serve --http`. Supports client credentials,
+    // authorization code + PKCE, and refresh token rotation. Renumbered from v30
+    // → v32 on merge with master's v0.23 (dream_verdicts at v30) + v0.25
+    // (eval_capture_tables at v31). OAuth is independent of those chains so
+    // ordering doesn't matter beyond version ledger correctness. CREATE TABLE
+    // statements are idempotent so brains that previously applied this at v30
+    // see version 32 as new and run IF NOT EXISTS DDL cleanly.
+    sql: `
+      CREATE TABLE IF NOT EXISTS oauth_clients (
+        client_id               TEXT PRIMARY KEY,
+        client_secret_hash      TEXT,
+        client_name             TEXT NOT NULL,
+        redirect_uris           TEXT[],
+        grant_types             TEXT[] DEFAULT '{"client_credentials"}',
+        scope                   TEXT,
+        token_endpoint_auth_method TEXT,
+        client_id_issued_at     BIGINT,
+        client_secret_expires_at BIGINT,
+        created_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE TABLE IF NOT EXISTS oauth_tokens (
+        token_hash   TEXT PRIMARY KEY,
+        token_type   TEXT NOT NULL,
+        client_id    TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+        scopes       TEXT[],
+        expires_at   BIGINT,
+        resource     TEXT,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_oauth_tokens_expiry ON oauth_tokens(expires_at);
+      CREATE INDEX IF NOT EXISTS idx_oauth_tokens_client ON oauth_tokens(client_id);
+      CREATE TABLE IF NOT EXISTS oauth_codes (
+        code_hash              TEXT PRIMARY KEY,
+        client_id              TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+        scopes                 TEXT[],
+        code_challenge         TEXT NOT NULL,
+        code_challenge_method  TEXT NOT NULL DEFAULT 'S256',
+        redirect_uri           TEXT NOT NULL,
+        state                  TEXT,
+        resource               TEXT,
+        expires_at             BIGINT NOT NULL,
+        created_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_mcp_log_time_agent ON mcp_request_log(created_at, token_name);
+      DO $$
+      DECLARE
+        has_bypass BOOLEAN;
+      BEGIN
+        SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+        IF has_bypass THEN
+          ALTER TABLE oauth_clients ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE oauth_tokens ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE oauth_codes ENABLE ROW LEVEL SECURITY;
+        ELSE
+          RAISE WARNING 'v32: role % lacks BYPASSRLS — skipping RLS on OAuth tables. Re-run as postgres (or a BYPASSRLS role) to harden.', current_user;
+        END IF;
+      END $$;
+    `,
+  },
+  {
+    version: 33,
+    name: 'admin_dashboard_columns_v0_26_3',
+    // v0.26.3 admin dashboard expansion. Adds 5 columns referenced by
+    // src/commands/serve-http.ts and src/core/oauth-provider.ts that landed
+    // in PR #586 without a corresponding schema migration. Without v33,
+    // existing brains hit:
+    //   - SELECT c.token_ttl, ... CASE WHEN c.deleted_at -> 503 on /admin/api/agents
+    //   - INSERT INTO mcp_request_log (... agent_name, params, error_message)
+    //     -> caught by best-effort try/catch, request log silently empties
+    //   - UPDATE oauth_clients SET deleted_at = now() (revoke-client) -> 500
+    //   - UPDATE oauth_clients SET token_ttl = ... (update-client-ttl) -> 500
+    // All ALTERs use ADD COLUMN IF NOT EXISTS so re-running is a no-op.
+    sql: `
+      ALTER TABLE oauth_clients
+        ADD COLUMN IF NOT EXISTS token_ttl INTEGER,
+        ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+
+      ALTER TABLE mcp_request_log
+        ADD COLUMN IF NOT EXISTS agent_name TEXT,
+        ADD COLUMN IF NOT EXISTS params JSONB,
+        ADD COLUMN IF NOT EXISTS error_message TEXT;
+
+      -- Backfill agent_name on existing rows so the new "agent" column in
+      -- the request log isn't blank for pre-v0.26.3 entries. LEFT JOIN
+      -- pattern: prefer client_name from oauth_clients (current behavior),
+      -- fall back to access_tokens.name (legacy bearer tokens), fall back
+      -- to the raw client_id stored as token_name.
+      UPDATE mcp_request_log m
+      SET agent_name = COALESCE(
+        (SELECT client_name FROM oauth_clients WHERE client_id = m.token_name LIMIT 1),
+        (SELECT name FROM access_tokens WHERE name = m.token_name LIMIT 1),
+        m.token_name
+      )
+      WHERE agent_name IS NULL;
+
+      -- Index for the new agent filter on /admin/api/request-log. The
+      -- existing idx_mcp_log_time_agent (created_at, token_name) doesn't
+      -- help when filtering by the resolved agent_name. Use DESC on
+      -- created_at to match the typical ORDER BY clause.
+      CREATE INDEX IF NOT EXISTS idx_mcp_log_agent_time
+        ON mcp_request_log(agent_name, created_at DESC);
+    `,
   },
 ];
 

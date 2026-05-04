@@ -1,5 +1,45 @@
 # TODOS
 
+## test infra (v0.26.2 follow-up — pre-existing failures triage)
+
+### Fix 22 pre-existing test failures unrelated to OAuth
+**Priority:** P0
+
+**What:** A `bun test` run on top of master at v0.26.2 surfaces 22 pre-existing failures across these suites — none touch v0.26.2's diff (oauth-provider.ts, auth.ts, oauth tests). They reproduce on a clean checkout against master:
+
+- 12 cases in `test/e2e/sync.test.ts` (Git-to-DB Sync Pipeline) — `result.status === 'first_sync'` vs actual `'synced'` state-machine drift; same root cause across all 12.
+- 3 cases in `test/e2e/multi-source.test.ts` (cascade delete + 2 sync routing) — performSync sourceId/local_path resolution.
+- `test/e2e/sync-parallel.test.ts` (60-file Postgres concurrency=4) — connection-leak probe regression.
+- `test/e2e/sync.test.ts` `--skip-failed` structured summary loop (v0.22.12 #500).
+- `test/e2e/dream.test.ts` (no --dry-run syncs pages) — runCycle DB write path.
+- `test/e2e/cycle.test.ts` (live cycle + chunks + lock cleanup).
+- `test/e2e/doctor.test.ts` (gbrain doctor exits 0 on healthy DB) — possibly related to v0.26.2 schema changes since CHANGELOG mentions extension of doctor checks.
+- `test/brain-registry.test.ts` (empty/null/undefined id routes to host) — unrelated to OAuth surface.
+- `test/e2e/claw-test.test.ts` (fresh-install scripted scenario) — needs investigation; took 3.9s and reported "produces zero error/blocker friction" failure.
+
+**Why:** These failures pre-date v0.26.2 (CHANGELOG already documents "18 pre-existing master timeouts" from v0.26.0 merge). v0.26.2 brings the count to 22, suggesting a 4-test drift on master between v0.26.0 ship and now. Fixing inside v0.26.2 would balloon scope from a 6-file OAuth fix-wave to a 30+ file test-infra repair. The fix-wave deserves its own PR with focused triage.
+
+**Likely root causes worth investigating:**
+- **bun execSync env inheritance** (already discovered + fixed in test/e2e/serve-http-oauth.test.ts during v0.26.2): bun's `execSync` does NOT inherit env mutations done via `process.env.X = ...`, only OS-level env from before bun started. helpers.ts loads `.env.testing` and sets `DATABASE_URL` via `process.env` mutation, which is invisible to subprocesses unless `env: { ...process.env }` is passed explicitly. Several of the failing E2E tests (sync, cycle, dream, claw-test) spawn subprocesses via execSync — likely the same bug.
+- **Test ordering / DB state pollution**: full-suite runs in bun test happen in a deterministic order; isolated runs of these test files may pass while suite runs fail. Could indicate beforeAll/afterAll cleanup gaps.
+- **Schema drift**: doctor/multi-source tests may rely on specific schema state that v0.26 OAuth tables changed.
+
+**Pros:**
+- Separating from v0.26.2 keeps the OAuth ship focused and auditable; the 22 failures aren't blocking real-world OAuth functionality.
+- The execSync env-inheritance pattern is now documented in test/e2e/serve-http-oauth.test.ts as a reference fix for the next maintainer.
+- Unblocks v0.26.2 ship while preserving the failure inventory for the follow-up.
+
+**Cons:**
+- 22 failing tests on master is real test-infra debt.
+- Some may be load-bearing (sync pipeline failures could mask real regressions in `performSync`).
+- `bun run ci:local` (full E2E gate) won't pass cleanly until these are addressed.
+
+**Context:** Discovered during v0.26.2 ship audit. Reproduce with `bun test 2>&1 | grep "^(fail)"` after copying `.env.testing` from a sibling worktree (port 5435 test DB running). The 17/17 OAuth E2E suite passes in isolation AND in full-suite after the env-inheritance fix landed.
+
+**Effort:** L (human ~4-8h; CC ~30-60min once env-inheritance fix is applied across all tests).
+
+**Depends on / blocked by:** None — independent of v0.26.2.
+
 ## ci-local-mirror
 
 ### CI-skip artifact + signature for stages 1+2 follow-up
@@ -715,19 +755,6 @@ iteration's residuals.
 
 **Depends on:** PGLite engine shipping (to have a real use case for the PR).
 
-### ChatGPT MCP support (OAuth 2.1)
-**What:** Add OAuth 2.1 with Dynamic Client Registration to the self-hosted MCP server so ChatGPT can connect.
-
-**Why:** ChatGPT requires OAuth 2.1 for MCP connectors. Bearer token auth is NOT supported. This is the only major AI client that can't use GBrain remotely.
-
-**Pros:** Completes the "every AI client" promise. ChatGPT has the largest user base.
-
-**Cons:** OAuth 2.1 is a significant implementation: authorization endpoint, token endpoint, PKCE flow, dynamic client registration. Estimated CC: ~3-4 hours.
-
-**Context:** Discovered during DX review (2026-04-10). All other clients (Claude Desktop/Code/Cowork, Perplexity) work with bearer tokens. The Edge Function deployment was removed in v0.8.0. OAuth needs to be added to the self-hosted HTTP MCP server (or `gbrain serve --http` when implemented).
-
-**Depends on:** `gbrain serve --http` (not yet implemented).
-
 ### Runtime MCP access control
 **What:** Add sender identity checking to MCP operations. Brain ops return filtered data based on access tier (Full/Work/Family/None).
 
@@ -765,6 +792,22 @@ iteration's residuals.
 
 ### ~~Constrained health_check DSL for third-party recipes~~
 **Completed:** v0.9.3 (2026-04-12). Typed DSL with 4 check types (`http`, `env_exists`, `command`, `any_of`). All 7 first-party recipes migrated. String health checks accepted with deprecation warning + metachar validation for non-embedded recipes.
+
+## P1 (new from v0.18.0 — test flakiness)
+
+### beforeAll hook timeouts under parallel test runner
+**What:** 17 tests across 9 files (dream, orphans, brain-allowlist, extract-db, multi-source-integration, core/cycle, migrations-v0_12_2, migrations-v0_13_1, oauth) fail with `beforeEach/afterEach hook timed out for this test` at the 7-10 second threshold when run via `bun run test` (parallel). Every test passes in isolation (`bun test path/to/file.test.ts` → 0 fail). Root cause is PGLite schema init racing under concurrent test files.
+
+**Why:** `bun run test` is the pre-ship gate and reports these as failures, forcing manual triage on every /ship. The tests themselves are correct — the runner is stressing PGLite boot. Bumping the hook timeout or running E2E-like tests with `--bail` or serial execution would clear the 18 false positives.
+
+**Fix options:**
+1. Bump per-test hook timeout to 30s in `bunfig.toml` (quick fix, low risk)
+2. Move PGLite-init-heavy tests to `test/e2e/` so they run serially via `scripts/run-e2e.sh` (follows existing pattern)
+3. Share a module-scoped PGLite instance across describe blocks within a file (biggest win — most fixture setup is identical)
+
+**Effort:** 30 min for option 1, ~2 hours for option 3.
+
+**Context:** Noticed during /ship merge wave on `garrytan/mcp-key-mgmt` (2026-04-16 branch merge of v0.18.0). Failure set stayed exactly 17-18 tests across multiple /ship runs, confirming deterministic flakes rather than real regressions. Blocking workaround: run the specific test file to verify after any suite change.
 
 ## P1 (new from v0.11.0 — Minions)
 
@@ -995,6 +1038,9 @@ iteration's residuals.
 **Depends on:** Nothing.
 
 ## Completed
+
+### ChatGPT MCP support (OAuth 2.1)
+**Completed:** v0.26.0 (2026-04-25) — `gbrain serve --http` ships full OAuth 2.1 via MCP SDK's `mcpAuthRouter` + `OAuthServerProvider`. Authorization code flow with PKCE unblocks ChatGPT. Client credentials flow unblocks Perplexity/Claude. Dynamic Client Registration available behind `--enable-dcr` flag (off by default). See `docs/mcp/CHATGPT.md` for connector setup. Closed the P0 that had been blocking the "every AI client" promise since v0.6.
 
 ### Implement AWS Signature V4 for S3 storage backend
 **Completed:** v0.6.0 (2026-04-10) — replaced with @aws-sdk/client-s3 for proper SigV4 signing.
