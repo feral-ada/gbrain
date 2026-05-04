@@ -663,6 +663,13 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
           error: (msg: string) => console.error(`[ERROR] ${msg}`),
         },
         dryRun: !!(params?.dry_run),
+        // F7: HTTP MCP is the untrusted/agent-facing transport. Stdio MCP at
+        // src/mcp/dispatch.ts:61 sets this; the inlined HTTP context-builder
+        // forgot it for several releases, which let HTTP MCP callers with a
+        // read+write token submit `shell` jobs and execute arbitrary commands
+        // on the host (RCE). The fail-closed contract in operations.ts is the
+        // belt; this is the suspenders.
+        remote: true,
         auth: authInfo,
       };
 
