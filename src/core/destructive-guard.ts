@@ -173,7 +173,7 @@ export function checkDestructiveConfirmation(
  * permanently removes the row (cascade delete to pages + chunks).
  *
  * v0.26.5: archive state moved from `config` JSONB keys to real columns
- * (`archived`, `archived_at`, `archive_expires_at`). Migration v33 backfills
+ * (`archived`, `archived_at`, `archive_expires_at`). Migration v34 backfills
  * pre-v0.26.5 rows. Faster filter, no reserved-key footgun. The `federated`
  * key stays in JSONB because federation has its own toggle path.
  */

@@ -203,7 +203,7 @@ export class PostgresEngine implements BrainEngine {
     const needsChunksBootstrap = probe.chunks_exists
       && (!probe.symbol_name_exists || !probe.language_exists);
     // v0.26.5: pages_deleted_at_purge_idx in SCHEMA_SQL crashes if the column
-    // doesn't exist yet. Migration v33 also adds it, but bootstrap runs first.
+    // doesn't exist yet. Migration v34 also adds it, but bootstrap runs first.
     const needsPagesDeletedAt = probe.pages_exists && !probe.deleted_at_exists;
 
     if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap && !needsPagesDeletedAt) return;
@@ -255,10 +255,10 @@ export class PostgresEngine implements BrainEngine {
     }
 
     if (needsPagesDeletedAt) {
-      // v33 (destructive_guard_columns) adds the column + sources columns +
+      // v34 (destructive_guard_columns) adds the column + sources columns +
       // partial purge index. Bootstrap only adds enough for SCHEMA_SQL's
       // `CREATE INDEX pages_deleted_at_purge_idx ... WHERE deleted_at IS NOT NULL`
-      // not to crash. v33 runs later via runMigrations and is idempotent.
+      // not to crash. v34 runs later via runMigrations and is idempotent.
       await conn.unsafe(`
         ALTER TABLE pages ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
       `);

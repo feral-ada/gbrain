@@ -312,10 +312,10 @@ export class PGLiteEngine implements BrainEngine {
     }
 
     if (needsPagesDeletedAt) {
-      // v33 (destructive_guard_columns) adds the column + sources columns +
+      // v34 (destructive_guard_columns) adds the column + sources columns +
       // partial purge index. Bootstrap only adds enough for PGLITE_SCHEMA_SQL's
       // `CREATE INDEX pages_deleted_at_purge_idx ... WHERE deleted_at IS NOT NULL`
-      // not to crash. v33 runs later via runMigrations and is idempotent.
+      // not to crash. v34 runs later via runMigrations and is idempotent.
       await this.db.exec(`
         ALTER TABLE pages ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
       `);
