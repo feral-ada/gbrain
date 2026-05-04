@@ -77,6 +77,34 @@ function validateRedirectUri(uri: string): void {
   );
 }
 
+/**
+ * Coerce an OAuth timestamp column (Unix epoch seconds, BIGINT) into a JS
+ * number, or undefined for SQL NULL.
+ *
+ * Why this exists: postgres.js with `prepare: false` (the auto-detected setting
+ * on Supabase PgBouncer / port 6543; see src/core/db.ts:resolvePrepare) returns
+ * BIGINT columns as strings. Two surfaces break on that: (1) the MCP SDK's
+ * bearerAuth middleware checks `typeof authInfo.expiresAt === 'number'` and
+ * rejects strings; (2) RFC 7591 §3.2.1 requires `client_id_issued_at` and
+ * `client_secret_expires_at` to be JSON numbers in DCR responses, not strings.
+ *
+ * Throws on non-finite (NaN/Infinity) so corrupt rows fail loud at the boundary
+ * instead of letting `expiresAt: NaN` flow through to the SDK as a fake-valid
+ * token. Returns undefined for SQL NULL so callers decide NULL semantics
+ * explicitly. For OAuth, the comparison sites treat NULL as "expired"
+ * (fail-closed); the DCR response sites preserve undefined per RFC 7591
+ * (the `client_secret_expires_at` field is optional, undefined means
+ * "did not expire").
+ */
+export function coerceTimestamp(value: unknown): number | undefined {
+  if (value === null || value === undefined) return undefined;
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    throw new Error(`coerceTimestamp: non-finite timestamp value ${JSON.stringify(value)}`);
+  }
+  return n;
+}
+
 interface GBrainOAuthProviderOptions {
   sql: SqlQuery;
   /** Default token TTL in seconds (default: 3600 = 1 hour) */
@@ -109,8 +137,8 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
       grant_types: (r.grant_types as string[]) || ['client_credentials'],
       scope: r.scope as string | undefined,
       token_endpoint_auth_method: r.token_endpoint_auth_method as string | undefined,
-      client_id_issued_at: r.client_id_issued_at as number | undefined,
-      client_secret_expires_at: r.client_secret_expires_at as number | undefined,
+      client_id_issued_at: coerceTimestamp(r.client_id_issued_at),
+      client_secret_expires_at: coerceTimestamp(r.client_secret_expires_at),
     };
   }
 
@@ -271,7 +299,11 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
 
     const row = rows[0];
     if (row.client_id !== client.client_id) throw new Error('Client mismatch');
-    if ((row.expires_at as number) < now) throw new Error('Refresh token expired');
+    // NULL expires_at is treated as expired (fail-closed). Schema permits NULL
+    // even though issueTokens always sets it, so a corrupt or hand-modified row
+    // can't ride past validation.
+    const expiresAt = coerceTimestamp(row.expires_at);
+    if (expiresAt === undefined || expiresAt < now) throw new Error('Refresh token expired');
 
     const tokenScopes = scopes || (row.scopes as string[]) || [];
     return this.issueTokens(client.client_id, tokenScopes, resource, true);
@@ -285,24 +317,34 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     const tokenHash = hashToken(token);
     const now = Math.floor(Date.now() / 1000);
 
-    // Try OAuth tokens first
+    // Try OAuth tokens first. JOIN oauth_clients in the same query so
+    // verifyAccessToken returns client_name in AuthInfo — eliminates the
+    // separate per-request lookup at serve-http.ts that was the N+1 hot
+    // path (see PR #586 review D14=B).
     const oauthRows = await this.sql`
-      SELECT client_id, scopes, expires_at, resource FROM oauth_tokens
-      WHERE token_hash = ${tokenHash} AND token_type = 'access'
+      SELECT t.client_id, t.scopes, t.expires_at, t.resource, c.client_name
+      FROM oauth_tokens t
+      LEFT JOIN oauth_clients c ON c.client_id = t.client_id
+      WHERE t.token_hash = ${tokenHash} AND t.token_type = 'access'
     `;
 
     if (oauthRows.length > 0) {
       const row = oauthRows[0];
-      if ((row.expires_at as number) < now) {
+      // NULL expires_at is treated as expired (fail-closed). Schema permits NULL,
+      // and the SDK's bearerAuth requires `typeof expiresAt === 'number'` — we
+      // throw here rather than return an undefined-bearing AuthInfo.
+      const expiresAt = coerceTimestamp(row.expires_at);
+      if (expiresAt === undefined || expiresAt < now) {
         throw new Error('Token expired');
       }
       return {
         token,
         clientId: row.client_id as string,
+        clientName: (row.client_name as string | null) ?? undefined,
         scopes: (row.scopes as string[]) || [],
-        expiresAt: Number(row.expires_at),
+        expiresAt,
         resource: row.resource ? new URL(row.resource as string) : undefined,
-      };
+      } as AuthInfo;
     }
 
     // Fallback: legacy access_tokens table (backward compat)
@@ -312,16 +354,20 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     `;
 
     if (legacyRows.length > 0) {
-      // Legacy tokens get full admin access (grandfather in)
+      // Legacy tokens get full admin access (grandfather in).
+      // For legacy tokens, name = clientId = clientName (single identifier).
       // Update last_used_at
       await this.sql`
         UPDATE access_tokens SET last_used_at = now() WHERE token_hash = ${tokenHash}
       `;
+      const name = legacyRows[0].name as string;
       return {
         token,
-        clientId: legacyRows[0].name as string,
+        clientId: name,
+        clientName: name,
         scopes: ['read', 'write', 'admin'],
-      };
+        expiresAt: Math.floor(Date.now() / 1000) + 365 * 24 * 3600, // Legacy tokens never expire — set 1yr future
+      } as AuthInfo;
     }
 
     throw new Error('Invalid token');
@@ -351,6 +397,15 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     const client = await this._clientsStore.getClient(clientId);
     if (!client) throw new Error('Client not found');
 
+    // Check if client has been revoked (soft-deleted)
+    try {
+      const [revoked] = await this.sql`SELECT deleted_at FROM oauth_clients WHERE client_id = ${clientId} AND deleted_at IS NOT NULL`;
+      if (revoked) throw new Error('Client has been revoked');
+    } catch (e) {
+      // deleted_at column may not exist on PGLite/older schemas — skip check
+      if (e instanceof Error && e.message === 'Client has been revoked') throw e;
+    }
+
     // Check grant type first (before verifying secret)
     const grants = (client.grant_types as string[]) || [];
     if (!grants.includes('client_credentials')) {
@@ -366,8 +421,16 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     const requestedScopes = requestedScope ? requestedScope.split(' ').filter(Boolean) : allowedScopes;
     const grantedScopes = requestedScopes.filter(s => allowedScopes.includes(s));
 
+    // Per-client TTL override (stored in oauth_clients.token_ttl)
+    // Column may not exist on PGLite/older schemas — graceful fallback
+    let clientTtl: number | undefined;
+    try {
+      const ttlRows = await this.sql`SELECT token_ttl FROM oauth_clients WHERE client_id = ${clientId}`;
+      if (ttlRows.length > 0 && ttlRows[0].token_ttl) clientTtl = Number(ttlRows[0].token_ttl);
+    } catch { /* token_ttl column doesn't exist — use server default */ }
+
     // Client credentials: access token only, NO refresh token (RFC 6749 4.4.3)
-    return this.issueTokens(clientId, grantedScopes, undefined, false);
+    return this.issueTokens(clientId, grantedScopes, undefined, false, clientTtl);
   }
 
   // -------------------------------------------------------------------------
@@ -419,11 +482,13 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     scopes: string[],
     resource: URL | undefined,
     includeRefresh: boolean,
+    ttlOverride?: number,
   ): Promise<OAuthTokens> {
     const accessToken = generateToken('gbrain_at_');
     const accessHash = hashToken(accessToken);
     const now = Math.floor(Date.now() / 1000);
-    const accessExpiry = now + this.tokenTtl;
+    const effectiveTtl = ttlOverride || this.tokenTtl;
+    const accessExpiry = now + effectiveTtl;
 
     await this.sql`
       INSERT INTO oauth_tokens (token_hash, token_type, client_id, scopes, expires_at, resource)
@@ -434,7 +499,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     const result: OAuthTokens = {
       access_token: accessToken,
       token_type: 'bearer',
-      expires_in: this.tokenTtl,
+      expires_in: effectiveTtl,
       scope: scopes.join(' '),
     };
 

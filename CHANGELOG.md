@@ -139,6 +139,220 @@ All 8 competing PRs close with thanks and a config recipe for each author's prov
 
 ---
 
+## [0.26.3] - 2026-05-03
+
+## **Admin dashboard you can trust. Magic-link login, single-use URLs, per-client token TTLs, observable everything.**
+## **OAuth clients and bearer tokens in one unified table. Auth-type-aware setup for five MCP clients.**
+
+v0.26.0 shipped the admin dashboard. v0.26.3 makes it production-trustworthy. The bootstrap token never persists in browser JS state. Magic-link URLs are single-use server-issued nonces (the bootstrap token never appears in a URL). Cookie sessions are HttpOnly + SameSite=Strict, and a "Sign out everywhere" button revokes every active session in one click. The trust model now matches what the marketing copy already implied.
+
+Both auth lanes are visible. OAuth clients and legacy `access_tokens` show up in one unified Agents table with resolved names, last-used timestamps, request counts, and a Revoke button that actually works (the v0.26.0 button was a no-op shell). API key rows are clickable; the drawer adapts content based on whether the agent uses OAuth or raw bearer.
+
+Per-client token TTL lands. Hardcoded 1-hour OAuth tokens meant Claude Code's built-in OAuth client (no auto-refresh) hit 401s every hour. New `oauth_clients.token_ttl` column + a Token Lifetime dropdown at register time (1h, 24h, 7d, 30d, 1y, no expiry). Editable from the agent drawer.
+
+Request log gains real teeth. `params` and `error_message` columns on `mcp_request_log`, agent-name resolution threaded through the existing token-verification SELECT (one query, no separate cache), click-to-filter by agent, expandable row detail. Filter parameters use postgres.js tagged-template fragments — no string interpolation, no `sql.unsafe`. The "what just happened on my brain" question is now one click away.
+
+Agent drawer adds a Config Export tab with auth-type-aware snippets for five clients: Claude Code (`read -s` prompt-based default + 2-step curl fallback so client secrets never enter shell history), ChatGPT, Claude.ai Cowork, Cursor (auth-type-aware bearer or OAuth), and Perplexity. ChatGPT/Cowork/Perplexity show an "OAuth client required" message when an API-key agent is selected, with a CTA pointing at the Register OAuth Client modal.
+
+### The numbers that matter
+
+18 fix-up commits on top of 16 PR commits, plus a separate codex pass that caught real bugs five Claude review passes missed (notably `loadApiKeys is not defined` in the Create-API-Key flow). Migration v33 adds the 5 columns the admin dashboard work was already referencing — without it, `gbrain upgrade` left the dashboard in a 503 state and the request log silently empty. Admin React build is now a CI gate so missing-symbol bugs fail before E2E.
+
+| Metric | BEFORE v0.26.3 | AFTER v0.26.3 | Δ |
+|---|---|---|---|
+| Bootstrap-token persistence | localStorage (forever) | never client-side | trust boundary closed |
+| Magic-link URL replay | works until server restart | single-use, ~5min TTL | URL leak limited |
+| Sign-out blast radius | this tab only | all sessions everywhere | truthful button |
+| OAuth token TTL | hardcoded 1h | per-client (1h–no expiry) | configurable |
+| Per-MCP-request DB roundtrip | name lookup query | folded into existing auth SELECT | -1 query/req |
+| Request-log filter SQL | sql.unsafe + manual escape | tagged-template fragments | no injection surface |
+| Admin React build gating | none | CI step before E2E | bugs caught earlier |
+| Schema migrations through v33 | 32 (admin cols missing) | 33 (admin cols present) | dashboard works |
+
+### What this means for operators
+
+Run `gbrain upgrade`. Restart `gbrain serve --http`. Ask your AI agent for the admin login link — it generates a one-time URL, you click, you're in. Close the tab, your session ends. Reopen, ask for a fresh link. No persistent token in your browser. Click Revoke on a misbehaving client and every existing token of theirs is invalid in one round-trip. Click Sign Out Everywhere and every browser tab dies. Watch the request log to see exactly which agents are doing what.
+
+## To take advantage of v0.26.3
+
+**Existing brains: run `gbrain apply-migrations --yes` after upgrade.** The dashboard 503s and the request log silently empties until migration v33 runs (5 new columns: `oauth_clients.token_ttl + deleted_at`, `mcp_request_log.{agent_name, params, error_message}`).
+
+`gbrain upgrade` should chain this automatically. If you're already running `gbrain serve --http`:
+
+1. **Run the migration explicitly:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Restart the server** so the new admin UI ships:
+   ```bash
+   gbrain serve --http
+   ```
+3. **Open `/admin`.** Ask your AI agent for a login link. Your agent reads the bootstrap token from the server's startup output and POSTs to `/admin/api/issue-magic-link` to mint a one-time URL. Click that URL — sets cookie, redirects to dashboard, link dies.
+4. **Verify both auth lanes show up:**
+   - Agents page → both OAuth clients and legacy bearer tokens in one table, click any row for details
+   - Click "+ API Key" or "+ OAuth Client" to register
+   - Request log resolves agent names directly (no per-request DB roundtrip thanks to the threaded JOIN)
+5. **For new agents that need long-lived tokens** (Claude Code, gstack-desktop), pick a Token Lifetime ≥ 30d at register time. Editable from the agent drawer.
+6. **For OAuth Claude Code config snippets:** the default uses `read -s` to prompt for the secret without echoing — secret never enters shell history. The 2-step curl fallback documents the alternative for shells that don't support `read -s`.
+7. **Sign out everywhere** lives in the sidebar footer. One click revokes every active admin session.
+
+If anything misbehaves, file an issue at https://github.com/garrytan/gbrain/issues with `gbrain doctor` output and which step broke.
+
+### Itemized changes
+
+**Schema (`src/core/migrate.ts`, `schema.sql`, `pglite-schema.ts`):**
+- Migration v33 adds 5 columns the admin dashboard work was already using: `oauth_clients.{token_ttl, deleted_at}` + `mcp_request_log.{agent_name, params, error_message}`
+- New index `idx_mcp_log_agent_time` for agent-filtered request-log queries
+- Inline UPDATE backfill of `agent_name` from `oauth_clients.client_name` → `access_tokens.name` → raw `token_name`
+- All ALTERs use `ADD COLUMN IF NOT EXISTS` so re-runs are no-ops
+
+**Admin dashboard (`admin/`):**
+- Bootstrap token never persists in browser JS state (no localStorage / sessionStorage cache)
+- Magic-link login: agent calls `POST /admin/api/issue-magic-link` to mint a one-time nonce URL; redemption rotates in-memory; second click on same URL fails with the styled error page
+- "Sign out everywhere" button revokes every active admin session in one click
+- API Keys + OAuth clients in one unified Agents table; both row types clickable
+- Hide-revoked toggle (defaults on) + empty-state placeholder when filtered result is empty
+- Per-client Token Lifetime dropdown at registration (1h, 24h, 7d, 30d, 1y, no expiry); editable from agent drawer
+- Auth-type-aware Config Export tabs:
+  - Claude Code: `read -s` prompt-based snippet (default) + 2-step curl fallback for OAuth, plain bearer for API keys
+  - Cursor: OAuth discovery URL OR raw bearer in `.cursor/mcp.json` based on auth type
+  - ChatGPT / Claude.ai / Perplexity: render an "OAuth client required" message + CTA on API-key agents
+- Request log: agent-name filter, params + error_message expandable detail, click-to-filter-by-agent
+- Working Revoke Agent button (was a no-op in v0.26.0)
+- Styled error page for expired/consumed magic links — tells operators how to recover
+- DESIGN.md locks in the dashboard design system (Inter + JetBrains Mono, no accent color, semantic-badges-carry-color, left-align)
+- Bug fix: `loadApiKeys()` reference replaced with `loadAgents()` — the Create-API-Key flow was throwing ReferenceError until codex caught it
+
+**Server (`src/commands/serve-http.ts`, `src/core/oauth-provider.ts`):**
+- `POST /admin/api/issue-magic-link` (Bearer auth with bootstrap token) → mints one-time nonce URL with 5-minute TTL
+- `POST /admin/api/sign-out-everywhere` → calls `adminSessions.clear()`, returns `{revoked_sessions: count}`
+- `GET /admin/auth/:nonce` is single-use (consumed nonces tracked in-memory with LRU cap of 1000) — bootstrap token never appears in a URL
+- `crypto.timingSafeEqual` on both `/admin/login` and `/admin/auth/:nonce` hash comparisons
+- Rate-limit `/admin/auth/:nonce` at 10/min/IP (express-rate-limit)
+- `verifyAccessToken` JOINs `oauth_clients` in its existing token SELECT and returns `clientName` on `AuthInfo` — eliminates the per-MCP-request DB roundtrip for log agent-name resolution
+- Request-log filter (`/admin/api/requests`) parameterized via postgres.js tagged-template fragments; `sql.unsafe()` + manual escape pattern removed; dead `paramIdx`/`query`/`params` variables deleted
+- Legacy `access_tokens` path now also returns `clientName = name` for symmetry
+- Ported `coerceTimestamp` helper (postgres-js BIGINT-as-string fix from master v0.26.2) so `test/oauth.test.ts` compiles standalone without needing a master merge
+
+**Tests:**
+- New E2E coverage in `test/e2e/serve-http-oauth.test.ts`:
+  - mcp_request_log new column round-trip (pins migration v33 against silent failure)
+  - Request-log filter SQL-injection probe (regression guard for parameterization)
+  - Per-client TTL flow (register, mint, decode `expires_in`, assert)
+  - Magic-link single-use semantic (nonce works once, fails twice)
+  - Magic-link styled 401 page (Content-Type: text/html, body contains "expired")
+  - agent_name resolution path
+  - register-client missing-name input validation
+- Renamed describe header to `serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)`
+
+### For contributors
+
+- Admin React build is a CI gate now: `scripts/check-admin-build.sh` runs `cd admin && bun install && bun run build` alongside the typecheck step in `bun run test`. Catches missing-symbol bugs (the kind codex caught) before they reach E2E. `GBRAIN_SKIP_ADMIN_BUILD=1` is the inner-loop escape hatch; production CI must not set it.
+- E2E test cleanup uses CLI `auth revoke-client` per registered `clientId` (with `dcrClientIds[]` accumulator for DCR-registered clients). The earlier `LIKE 'e2e-%'` pattern-matching cleanup was replaced — direct ID-based cleanup is safer (no risk of nuking a non-test client whose name happens to start with `e2e-`).
+- `scripts/check-no-legacy-getconnection.sh` allow-list adds `src/commands/integrity.ts` (pre-existing `db.getConnection()` call from v0.22.16; PR 1 refactors to accept engine).
+- Full plan + codex review pass artifacts live at `~/.claude/plans/check-this-out-and-breezy-forest.md` (5 review passes + codex outside-voice + 14 D-decisions documented).
+
+## [0.26.2] - 2026-05-03
+
+## **MCP fix-wave: every postgres-as-string OAuth bug, killed at the boundary.**
+## **Bigger guarantees: `revoke-client` lands as a real CLI, NULL expires_at is treated as expired, corrupt rows fail loud at the row-read boundary instead of skating past validation.**
+
+`gbrain serve --http` now does the right thing on every postgres-driver-as-string edge case the v0.26.1 hot-fix didn't reach. The same bug class that broke `client_credentials` token validation in production (postgres.js with `prepare: false` returns BIGINT columns as strings, and the MCP SDK's bearerAuth checks `typeof === 'number'`) hides at four other read sites in `src/core/oauth-provider.ts`. Two of those flow into the RFC 7591 §3.2.1 Dynamic Client Registration response, where strict OAuth clients reject string timestamps and the registration silently fails. v0.26.2 closes the bug class with a single named helper at the boundary.
+
+The shape changed during eng + outside-voice review. The first draft normalized rows with inline `Number(...)` calls, but a `Number('foo') → NaN` slipping through is fail-OPEN, not fail-closed: `NaN < now` is `false`, so the expired-token branch is skipped and the SDK gets `expiresAt: NaN` as if the token were valid. Codex flagged this. The shipped helper, `coerceTimestamp()`, throws on non-finite input — corrupt rows fail loud at the boundary instead of riding through token validation.
+
+Plus: `gbrain auth revoke-client <client_id>` lands as a first-class CLI subcommand. Schema-level `ON DELETE CASCADE` on `oauth_tokens.client_id` and `oauth_codes.client_id` purges every active token and authorization code in a single atomic transaction. The matching v0.26.1 E2E test had been calling this subcommand all along — silently failing because the subcommand didn't exist. v0.26.2 makes the cleanup actually work.
+
+### The numbers that matter
+
+5 string-vs-number sites identified in the original v0.26.1 audit; 5 fixed in v0.26.2. 4 new tests covering surfaces v0.26.1 didn't reach: real DCR `/register` HTTP-level response shape, real CLI subprocess invocation of `revoke-client`, NULL `expires_at` semantics, cascade-delete contract.
+
+| Metric | BEFORE v0.26.2 | AFTER v0.26.2 | Δ |
+|---|---|---|---|
+| Sites where postgres-as-string can break OAuth | 4 latent (1 fixed in v0.26.1) | 0 | bug class closed |
+| `Number(...)` on corrupt row | flows through as NaN (fail-OPEN) | helper throws (fail-CLOSED) | loud failure |
+| `gbrain auth revoke-client` | doesn't exist | first-class CLI subcommand | +1 |
+| E2E afterAll cleanup | silently failing | actually deletes the test client | reliable |
+| DCR `/register` response timestamps | strings under `prepare: false` | RFC 7591 §3.2.1 numbers | spec-compliant |
+
+### What this means for operators
+
+Strict OAuth clients (Claude Code, Cursor) connecting via `gbrain serve --http` get spec-compliant `client_id_issued_at` numbers in their DCR responses. Operators get a real `revoke-client` subcommand and CASCADE-driven token purge. CI runs no longer leak orphan `gbrain_cl_*` rows on every E2E pass. Run `gbrain upgrade`. No schema migration. No manual step.
+
+### For contributors
+
+The boundary helper `coerceTimestamp` is intentionally module-private to `src/core/oauth-provider.ts` and not promoted to `src/core/utils.ts`. Codex review flagged repo-wide BIGINT precision-loss risk for a generic helper; the OAuth surface is bounded and well-understood, the rest of the repo isn't. Promote later if the pattern recurs.
+
+### Known caveats
+
+Hard-deleting a client orphans its entries in `mcp_request_log` (the table stores `token_name` TEXT with no FK). The admin UI's request-log view will show those entries with the literal token_name and no client correlation. Acceptable for a fix-wave; v0.27 can add a `[revoked]` badge or `LEFT JOIN`-aware rendering if forensics needs grow.
+
+## To take advantage of v0.26.2
+
+`gbrain upgrade` is sufficient. No schema migration. No manual step.
+
+```bash
+gbrain upgrade
+gbrain --version  # should print 0.26.2
+```
+
+If you operate `gbrain serve --http` and have OAuth clients registered, no client-side action is needed. Existing tokens keep working. Rolling token rotation continues to work. The new `gbrain auth revoke-client <client_id>` subcommand is available for cleanup.
+
+### Itemized changes
+
+#### OAuth bug-class fixes
+- **`coerceTimestamp()` boundary helper** in `src/core/oauth-provider.ts`. Throws on non-finite input (NaN/Infinity); returns undefined for SQL NULL so callers decide NULL semantics explicitly. Doc comment names the three load-bearing pieces: postgres `prepare: false` BIGINT-as-string behavior, MCP SDK's `typeof === 'number'` bearerAuth check, RFC 7591 §3.2.1 JSON-number requirement.
+- **5 call sites refactored** to use the helper:
+  - `getClient` (L112, L113): `client_id_issued_at` and `client_secret_expires_at` now flow through the helper, so DCR `/register` responses are RFC-compliant numbers.
+  - `exchangeRefreshToken` (L274): NULL `expires_at` is treated as expired (fail-closed). Schema permits NULL on `oauth_tokens.expires_at`; corrupt rows can no longer ride past validation.
+  - `verifyAccessToken` (L296, L303): same NULL-as-expired contract for access tokens; the SDK's bearerAuth gets a guaranteed `typeof === 'number'` value.
+- **Removed inline `Number(...)` from L303** introduced in v0.26.1; replaced with the helper-narrowed value from the L296 guard for consistency. Behavior unchanged.
+
+#### New CLI subcommand
+- **`gbrain auth revoke-client <client_id>`** lands in `src/commands/auth.ts`. Atomic `DELETE...RETURNING` on `oauth_clients`, FK CASCADE purges `oauth_tokens` and `oauth_codes`. Prints client name + cascade confirmation. `process.exit(1)` on no-such-client (idempotent: re-running on the same id produces the same exit-1 message).
+- Help text + router case wired alongside `register-client`.
+
+#### Tests
+- `test/oauth.test.ts`: 5 unit cases for `coerceTimestamp` (null/undefined/string/number/throw-on-NaN), NULL-`expires_at`-as-expired contract test, cascade-delete contract test.
+- `test/e2e/serve-http-oauth.test.ts`: real DCR `/register` HTTP-level response-shape test (asserts `typeof body.client_id_issued_at === 'number'` over the wire, not just internal-store shape); real CLI subprocess test for `revoke-client` (registers → mints token → revokes via execSync → asserts token rejected at `/mcp` → asserts re-run exits 1).
+- E2E `afterAll` cleanup: now guarded on `clientId` (won't throw if `beforeAll` failed before registration); cleanup errors surface to stderr without throwing so real test failures aren't masked. Tracks DCR-registered clients alongside the manual one.
+- Server fixture: `--enable-dcr` added so `/register` is reachable in the DCR test.
+
+#### Mechanics
+- `VERSION` → `0.26.2`. `package.json` → `0.26.2`. `bun.lock` refreshed.
+
+### Credits
+
+This branch was driven by an audit of PR #577 (v0.26.1). Codex independent review surfaced 5 factual errors and 7 design gaps the in-house eng review had cleared. The shipped scope is tighter and more honest than the original D1 plan — the outside voice was the load-bearing input.
+
+## [0.26.1] - 2026-05-03
+
+## **MCP bearer-auth hot-fix: `client_credentials` tokens stop being rejected at `/mcp`.**
+
+A three-bug fix-wave landed on master as PR #577 to unblock production OAuth connections. Every token minted via `client_credentials` was being rejected at `/mcp` with `HTTP 401 {"error":"invalid_token","error_description":"Token has no expiration time"}`. Token issuance worked; validation failed because the postgres-js driver with `prepare: false` returns BIGINT columns as strings and the MCP SDK's bearerAuth middleware checks `typeof authInfo.expiresAt === 'number'`.
+
+Found in production connecting Claude Code through Caddy/Tailscale to `gbrain serve --http`.
+
+### What shipped
+
+- **`Number(row.expires_at)` cast** in `verifyAccessToken` (`src/core/oauth-provider.ts:303`) so the SDK gets a JS number, not a postgres string.
+- **OAuth metadata interceptor middleware** in `src/commands/serve-http.ts:164-175`. The MCP SDK hardcodes `grant_types_supported: ['authorization_code', 'refresh_token']` in its `.well-known/oauth-authorization-server` response. The middleware patches `res.json` to append `client_credentials` so RFC-conformant clients (Claude Code, Cursor) auto-discover the flow.
+- **Express 5 compat fixes** in `src/commands/serve-http.ts`:
+  - `app.set('trust proxy', 'loopback')` so reverse-proxy deployments (Caddy on localhost, Tailscale) don't crash `express-rate-limit` with `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR`. Restricts proxy trust to localhost only — does NOT trust arbitrary `X-Forwarded-For`.
+  - `/admin/{*path}` (Express 5 named-wildcard syntax) instead of the bare `/admin/*` Express 5 dropped.
+
+### Tests
+
+50 cases / 201 assertions including a real-Postgres E2E (`test/e2e/serve-http-oauth.test.ts`) that spawns a subprocess server, registers an OAuth client via the CLI, mints tokens via client_credentials, and exercises the full MCP JSON-RPC pipeline end-to-end.
+
+### Process note
+
+PR #577 shipped its three fixes but did not bump `VERSION`, `package.json`, or `CHANGELOG.md`. v0.26.2 retroactively writes this v0.26.1 entry so the changelog matches the commit history. The /ship workflow's version idempotency check (Step 12) will catch drifts like this in the future.
+
+### Credits
+
+Co-authored by Wintermute. Found in production. Three bugs, 22 lines, real fix.
+
 ## [0.26.0] - 2026-04-25
 
 ## **Multi-agent MCP is real. OAuth 2.1, HTTP server, React admin dashboard. Ship once, every AI client connects.**
