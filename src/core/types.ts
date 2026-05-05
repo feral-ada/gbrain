@@ -7,6 +7,41 @@
 // code-refs / code-callers / code-callees + Cathedral II two-pass retrieval.
 export type PageType = 'person' | 'company' | 'deal' | 'yc' | 'civic' | 'project' | 'concept' | 'source' | 'media' | 'writing' | 'analysis' | 'guide' | 'hardware' | 'architecture' | 'meeting' | 'note' | 'email' | 'slack' | 'calendar-event' | 'code';
 
+/**
+ * Canonical list of every PageType value. Kept in sync with the union above.
+ * Used by the v0.27.1 page-type-exhaustive contract test to walk every value
+ * through public surfaces (serialize, slug registry, frontmatter validate)
+ * and assert no surprise. Adding a value to PageType MUST also add it here —
+ * the contract test enforces parity.
+ */
+export const ALL_PAGE_TYPES: readonly PageType[] = [
+  'person', 'company', 'deal', 'yc', 'civic', 'project', 'concept',
+  'source', 'media', 'writing', 'analysis', 'guide', 'hardware',
+  'architecture', 'meeting', 'note', 'email', 'slack', 'calendar-event',
+  'code',
+] as const;
+
+/**
+ * Exhaustiveness helper. Use in the default branch of any `switch (x.type)`
+ * to force the TypeScript compiler to error if the union grows. The CI guard
+ * scripts/check-pagetype-exhaustive.sh enforces that any new switch on a
+ * PageType-shaped discriminator imports and uses this helper in default.
+ *
+ *   switch (page.type) {
+ *     case 'person': return ...;
+ *     case 'company': return ...;
+ *     // ... every other PageType ...
+ *     default: return assertNever(page.type);
+ *   }
+ *
+ * If a new PageType is added without a corresponding case, `assertNever`
+ * fails to type-check (the parameter is no longer `never`), preventing the
+ * silent default-branch fall-through that bit gbrain v0.20 / v0.22.
+ */
+export function assertNever(x: never): never {
+  throw new Error(`Unhandled discriminant: ${JSON.stringify(x)}`);
+}
+
 export interface Page {
   id: number;
   slug: string;
