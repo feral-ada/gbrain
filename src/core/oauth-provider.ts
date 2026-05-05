@@ -288,7 +288,11 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     // entirely. With RETURNING, the second request — or any wrong-client /
     // wrong-redirect-uri attempt — gets zero rows back and fails cleanly.
     // The legitimate client's code stays available for one valid redemption.
-    const rows = redirectUri
+    //
+    // Use `redirectUri !== undefined` rather than truthy — an attacker
+    // submitting `redirect_uri=""` (empty string) at /token would otherwise
+    // hit the falsy branch and bypass the binding entirely.
+    const rows = redirectUri !== undefined
       ? await this.sql`
           DELETE FROM oauth_codes
           WHERE code_hash = ${codeHash}

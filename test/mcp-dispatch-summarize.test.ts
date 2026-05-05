@@ -94,4 +94,29 @@ describe('summarizeMcpParams — declared-keys allow-list', () => {
     const serialized = JSON.stringify(summary);
     expect(serialized).not.toContain('sensitive');
   });
+
+  test('approx_bytes is bucketed to 1KB to defeat size-based side-channels', () => {
+    // D16 / adversarial-review fix: the previous shape exposed exact byte
+    // length of every request, enabling an attacker to binary-search the
+    // size of secret content via repeated probes (submit put_page with a
+    // known prefix, observe approx_bytes, narrow the unknown-suffix size).
+    // Bucketing to 1KB resolution destroys the side-channel while keeping
+    // the operator-useful "roughly how big" signal.
+    const tiny = summarizeMcpParams('put_page', { slug: 'a' }) as ParamSummary;
+    // Tiny payload (~14 bytes) rounds up to the first 1KB bucket.
+    expect(tiny.approx_bytes).toBe(1024);
+
+    // 2KB payload should fall in either the 2KB or 3KB bucket depending on
+    // exact serialization length — the invariant is that it's a multiple of
+    // 1024, NOT the literal byte count.
+    const medium = summarizeMcpParams('put_page', {
+      slug: 'people/test',
+      content: 'x'.repeat(2000),
+    }) as ParamSummary;
+    expect(medium.approx_bytes).toBeDefined();
+    expect(medium.approx_bytes! % 1024).toBe(0);
+    // Bucket cannot be less than the actual size and must round UP, so
+    // a ~2KB payload lands in the 2KB or 3KB bucket.
+    expect(medium.approx_bytes!).toBeGreaterThanOrEqual(2048);
+  });
 });

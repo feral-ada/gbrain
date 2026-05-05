@@ -57,11 +57,30 @@ export interface ParamSummary {
   approx_bytes?: number;
 }
 
+/**
+ * Round a byte count UP to the nearest 1KB so the redacted summary keeps a
+ * coarse size signal without enabling a size-based side channel.
+ *
+ * Why bucketing matters: the previous shape published `approx_bytes` as the
+ * exact JSON.stringify(params).length. An attacker who can submit
+ * `put_page` with a known prefix and observe the resulting log entry
+ * could binary-search the byte length of secret content (the body the
+ * legitimate user just wrote) via repeated probes. Bucketing to 1KB
+ * resolution destroys that channel while preserving the operator-useful
+ * "roughly how large was the request" signal.
+ */
+function bucketBytes(n: number | undefined): number | undefined {
+  if (n === undefined || !Number.isFinite(n)) return undefined;
+  if (n <= 0) return 0;
+  const KB = 1024;
+  return Math.ceil(n / KB) * KB;
+}
+
 export function summarizeMcpParams(opName: string, params: unknown): ParamSummary | null {
   if (params == null) return null;
 
   let approxBytes: number | undefined;
-  try { approxBytes = JSON.stringify(params).length; } catch { approxBytes = undefined; }
+  try { approxBytes = bucketBytes(JSON.stringify(params).length); } catch { approxBytes = undefined; }
 
   if (Array.isArray(params)) {
     return {

@@ -879,6 +879,33 @@ describe('F7c redirect_uri binding on auth code exchange', () => {
     ).rejects.toThrow();
   });
 
+  test('empty-string redirect_uri does NOT bypass the binding', async () => {
+    // D15 / adversarial-review fix: `redirectUri ? ...` would treat empty string
+    // as falsy and silently fall through to the no-redirect-uri branch,
+    // letting an attacker submit `redirect_uri=""` to bypass the predicate.
+    // The fix uses `redirectUri !== undefined`. This test asserts the bypass
+    // is closed: an empty-string redirect_uri must reject (zero-row DELETE
+    // since stored value is the original non-empty URI), not slip through.
+    const { clientId } = await provider.registerClientManual(
+      'redir-empty-test', ['authorization_code'], 'read',
+      ['http://localhost:3000/callback'],
+    );
+    const client = (await provider.clientsStore.getClient(clientId))!;
+
+    let redirectUrl = '';
+    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    await provider.authorize(client, {
+      codeChallenge: 'challenge',
+      redirectUri: 'http://localhost:3000/callback',
+      scopes: ['read'],
+    }, mockRes);
+    const code = new URL(redirectUrl).searchParams.get('code')!;
+
+    await expect(
+      provider.exchangeAuthorizationCode(client, code, undefined, ''),
+    ).rejects.toThrow();
+  });
+
   test('omitted redirect_uri (back-compat) still succeeds', async () => {
     // Existing callers that don't pass redirectUri keep working — the
     // predicate only fires when redirectUri is provided. This protects
