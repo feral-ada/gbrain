@@ -2,7 +2,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { vector } from '@electric-sql/pglite/vector';
 import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm';
 import type { Transaction } from '@electric-sql/pglite';
-import type { BrainEngine, LinkBatchInput, TimelineBatchInput, ReservedConnection, DreamVerdict, DreamVerdictInput } from './engine.ts';
+import type { BrainEngine, LinkBatchInput, TimelineBatchInput, ReservedConnection, DreamVerdict, DreamVerdictInput, FileSpec, FileRow } from './engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
 import { runMigrations } from './migrate.ts';
 import { PGLITE_SCHEMA_SQL, getPGLiteSchema } from './pglite-schema.ts';
@@ -1350,6 +1350,61 @@ export class PGLiteEngine implements BrainEngine {
       );
     }
     return result.rows as unknown as RawData[];
+  }
+
+  // Files (v0.27.1): see PostgresEngine.upsertFile for the same contract.
+  async upsertFile(spec: FileSpec): Promise<{ id: number; created: boolean }> {
+    const sourceId = spec.source_id ?? 'default';
+    const result = await this.db.query<{ id: number; created: boolean }>(
+      `INSERT INTO files (source_id, page_slug, page_id, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+       ON CONFLICT (storage_path) DO UPDATE SET
+         page_slug = EXCLUDED.page_slug,
+         page_id = EXCLUDED.page_id,
+         filename = EXCLUDED.filename,
+         mime_type = EXCLUDED.mime_type,
+         size_bytes = EXCLUDED.size_bytes,
+         content_hash = EXCLUDED.content_hash,
+         metadata = EXCLUDED.metadata
+       RETURNING id, (xmax = 0) AS created`,
+      [
+        sourceId,
+        spec.page_slug ?? null,
+        spec.page_id ?? null,
+        spec.filename,
+        spec.storage_path,
+        spec.mime_type ?? null,
+        spec.size_bytes ?? null,
+        spec.content_hash,
+        JSON.stringify(spec.metadata ?? {}),
+      ]
+    );
+    if (result.rows.length === 0) {
+      throw new Error(`upsertFile returned no rows for ${spec.storage_path}`);
+    }
+    return { id: result.rows[0].id, created: !!result.rows[0].created };
+  }
+
+  async getFile(sourceId: string, storagePath: string): Promise<FileRow | null> {
+    const result = await this.db.query<FileRow>(
+      `SELECT id, source_id, page_slug, page_id, filename, storage_path, mime_type, size_bytes, content_hash, metadata, created_at
+       FROM files
+       WHERE source_id = $1 AND storage_path = $2
+       LIMIT 1`,
+      [sourceId, storagePath]
+    );
+    return result.rows.length > 0 ? (result.rows[0] as FileRow) : null;
+  }
+
+  async listFilesForPage(pageId: number): Promise<FileRow[]> {
+    const result = await this.db.query<FileRow>(
+      `SELECT id, source_id, page_slug, page_id, filename, storage_path, mime_type, size_bytes, content_hash, metadata, created_at
+       FROM files
+       WHERE page_id = $1
+       ORDER BY created_at ASC`,
+      [pageId]
+    );
+    return result.rows as FileRow[];
   }
 
   // Dream-cycle significance verdict cache (v0.23).

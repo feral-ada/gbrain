@@ -3,8 +3,13 @@
  *
  * Differences from Postgres:
  * - No RLS block (no role system in embedded PGLite)
- * - No files table (file attachments require Supabase Storage)
  * - No pg_advisory_lock (single connection)
+ *
+ * As of v0.27.1 the `files` table mirrors the Postgres shape on PGLite —
+ * v0.18 originally omitted it because file attachments required Supabase
+ * Storage, but v0.27.1 multimodal ingestion stores image bytes on disk in
+ * the brain repo and only indexes metadata. Path-referenced binary asset
+ * tracking works fine on PGLite. Migration v36 adds it for existing brains.
  *
  * Includes OAuth tables (oauth_clients, oauth_tokens, oauth_codes) and
  * auth infrastructure (access_tokens, mcp_request_log) because
@@ -157,6 +162,33 @@ CREATE TABLE IF NOT EXISTS raw_data (
 );
 
 CREATE INDEX IF NOT EXISTS idx_raw_data_page ON raw_data(page_id);
+
+-- ============================================================
+-- files: binary asset metadata (v0.27.1 — PGLite parity for multimodal)
+-- Image bytes never enter the DB; storage_path references a path in the
+-- brain repo. Identity is (source_id, storage_path) via the UNIQUE
+-- constraint on storage_path; upserts replace metadata in place.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS files (
+  id           SERIAL PRIMARY KEY,
+  source_id    TEXT   NOT NULL DEFAULT 'default'
+               REFERENCES sources(id) ON DELETE CASCADE,
+  page_slug    TEXT,
+  page_id      INTEGER REFERENCES pages(id) ON DELETE SET NULL,
+  filename     TEXT   NOT NULL,
+  storage_path TEXT   NOT NULL,
+  mime_type    TEXT,
+  size_bytes   BIGINT,
+  content_hash TEXT   NOT NULL,
+  metadata     JSONB  NOT NULL DEFAULT '{}',
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(storage_path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_files_page ON files(page_slug);
+CREATE INDEX IF NOT EXISTS idx_files_page_id ON files(page_id);
+CREATE INDEX IF NOT EXISTS idx_files_source_id ON files(source_id);
+CREATE INDEX IF NOT EXISTS idx_files_hash ON files(content_hash);
 
 -- ============================================================
 -- timeline_entries: structured timeline
