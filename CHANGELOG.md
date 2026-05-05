@@ -2,6 +2,57 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.26.9] - 2026-05-04
+
+## **OAuth 2.1 hardening + closes an HTTP MCP shell-job RCE.**
+## **Anyone running `gbrain serve --http` should upgrade. The same write-scoped token your agent uses to call `put_page` could submit `shell` jobs and execute commands on the gbrain host.**
+
+The HTTP MCP transport's request-handler context literal was missing one field — `remote: true` — and that one field was the difference between a trusted local CLI write and an untrusted agent-facing write. With it absent, `operations.ts:1391`'s protected-job-name guard saw a falsy undefined and skipped. An HTTP MCP caller with a `read+write` OAuth token could submit `submit_job {name: "shell", params: {cmd: "id"}}` and own the host. Stdio MCP set the field correctly via `src/mcp/dispatch.ts:61`; HTTP inlined a parallel context-builder for several releases and lost it.
+
+Fix is two-layered. **F7** (`serve-http.ts`) sets `remote: true` explicitly. **F7b** flips the four trust-boundary call sites in `operations.ts` from falsy-default to `ctx.remote !== false` — anything that isn't strictly `false` now treats the caller as remote/untrusted, so a future transport that forgets the field fails closed instead of fails open. **D12** makes `OperationContext.remote` REQUIRED in the TypeScript type so the compiler is the first line of defense; the runtime fail-closed defaults are belt+suspenders for `as` casts and `Partial<>` spreads.
+
+The OAuth provider in `src/core/oauth-provider.ts` got a parallel hardening pass on the same release. **F1+F2** fold `client_id` atomically into the auth-code and refresh-token DELETE WHERE clauses (RFC 6749 §10.5 + §10.4 — pre-fix the post-hoc client compare burned the row on wrong-client paths so the legitimate client couldn't retry). **F3** enforces the refresh-scope-subset rule against the original grant on the row, not the client's currently-allowed scopes (RFC 6749 §6). **F4** binds `client_id` on `revokeToken` so a client can only revoke its own tokens (RFC 7009 §2.1). **F7c** validates `redirect_uri` on `/token` against the value stored at `/authorize` (RFC 6749 §4.1.3 — eva-brain missed this; codex caught it). **F5** swaps bare `catch {}` for SQLSTATE 42703 column-existence probes so lock timeouts and network blips no longer ride through as "column missing." **F6** fixes `sweepExpiredTokens` to actually return a count.
+
+`mcp_request_log` and the admin SSE feed now redact request payloads by default. The new `summarizeMcpParams` helper at `src/mcp/dispatch.ts` intersects submitted keys against the operation's declared `params` allow-list — declared keys preserve for debug visibility, unknown keys are counted but never named (closes the attacker-controlled-key-name leak surface). Byte counts get bucketed to 1KB so attackers can't binary-search secret-content sizes via repeated probes. Operators on their own laptops who want full payload visibility can flip on `--log-full-params` with a loud stderr warning.
+
+Smaller hardening: admin cookies set `Secure` when behind HTTPS or a public-URL proxy (F9), magic-link nonces are bounded by an LRU cap (F10), `/mcp` wraps `transport.handleRequest` in try/catch so SDK throws hit a JSON-RPC 500 instead of express's default HTML error page (F14), and OperationError + unexpected exceptions both route through the unified `buildError`/`serializeError` envelope (F15). DCR disable became a constructor option on the provider rather than a serve-http monkey-patch (F12 — cleanup, not security).
+
+To take advantage of v0.26.9
+============================
+
+`gbrain upgrade` is a one-step upgrade. There is no migration; all changes are application-layer.
+
+1. **Upgrade.** `gbrain upgrade`. Confirm `gbrain --version` shows `0.26.9`.
+
+2. **If you run `gbrain serve --http`,** restart the process. The trust-boundary fix is in the request handler, so it takes effect on the next listen.
+
+3. **If you run a multi-tenant deployment** (operators other than you have admin / register-client access), audit existing OAuth clients for unexpected redirect_uris with `gbrain auth list-clients` (when you wire the helper) or by inspecting `oauth_clients.redirect_uris` directly. The hardening doesn't touch existing clients; it only constrains future redemptions.
+
+4. **If your dashboard or scripts read `mcp_request_log.params`,** note the schema shift. The default shape is now `{redacted: true, kind, declared_keys, unknown_key_count, approx_bytes}` (declared_keys is sorted; approx_bytes rounds up to nearest KB). Pass `--log-full-params` to `gbrain serve --http` to opt back into raw payloads with a startup warning.
+
+5. **If anything breaks,** please file an issue: https://github.com/garrytan/gbrain/issues
+
+Thanks to @ElectricSheepIO on X for the security review that surfaced this hardening pass.
+
+### Itemized changes
+
+- `src/core/oauth-provider.ts` — atomic client_id binding (F1, F2, F4), redirect_uri validation on exchange (F7c), refresh scope subset (F3), `isUndefinedColumnError` column probes (F5), `sweepExpiredTokens` correct count via `RETURNING 1` (F6), `dcrDisabled` constructor option (F12).
+- `src/core/operations.ts` — `OperationContext.remote` becomes required (D12). Four sites flipped to `ctx.remote !== false` / `=== false` for fail-closed semantics (F7b).
+- `src/commands/serve-http.ts` — explicit `remote: true` on /mcp context (F7), `summarizeMcpParams` wired into `mcp_request_log` + SSE feed by default (F8), `--log-full-params` opt-in, cookie `secure` flag (F9), bounded magic-link nonce LRU (F10), try/catch wrap on transport.handleRequest (F14), unified error envelope via `buildError`/`serializeError` (F15), DCR disable via provider constructor (F12).
+- `src/commands/serve.ts` — `--log-full-params` argv flag with stderr warning at startup.
+- `src/mcp/dispatch.ts` — new `summarizeMcpParams(opName, params)` helper. Returns `{redacted, kind, declared_keys, unknown_key_count, approx_bytes}` with allow-list intersection and 1KB bucketing.
+- `src/core/utils.ts` — extracted `isUndefinedColumnError` predicate (D14, reusable).
+- `test/oauth.test.ts` — 14 new cases pinning F1/F2/F3/F4/F5/F6/F7c/F12 invariants, including the empty-string redirect_uri bypass test from the adversarial-review pass.
+- `test/mcp-dispatch-summarize.test.ts` — 7 cases pinning F8 redaction invariants including the attacker-key-name probe and the 1KB bucket assertion.
+- `test/trust-boundary-contract.test.ts` — 4 cases pinning F7b fail-closed semantics under cast bypass.
+- `test/e2e/serve-http-oauth.test.ts` — 2 new E2E regressions for shell-job and subagent-job submission rejection over HTTP MCP.
+- `test/e2e/graph-quality.test.ts` — adds explicit `remote: false` to the test fixture (D13 audit follow-through).
+
+### For contributors
+
+- `test/oauth.test.ts` now uses the F1/F4 cross-client isolation pattern: a wrong-client attempt must reject AND the rightful owner must still succeed atomically afterward. Apply the same shape when adding tests around the OAuth provider's predicate-bound DELETEs.
+- `summarizeMcpParams` is the canonical privacy-preserving redactor. New code paths that log MCP request shapes should route through it rather than inlining `JSON.stringify(params)`.
+
 ## [0.26.7] - 2026-05-04
 
 ## **Test isolation foundation. Lint guard + helper + quarantine renames before the env and PGLite sweeps.**
