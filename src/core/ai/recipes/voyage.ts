@@ -20,6 +20,9 @@ export const voyage: Recipe = {
       default_dims: 1024,
       cost_per_1m_tokens_usd: 0.18,
       price_last_verified: '2026-04-20',
+      // Voyage enforces 120K tokens per batch. Use conservative limit
+      // because Voyage's tokenizer runs 3-4× denser than tiktoken.
+      max_batch_tokens: 120_000,
     },
   },
   setup_hint: 'Get an API key at https://dash.voyageai.com/api-keys, then `export VOYAGE_API_KEY=...`',

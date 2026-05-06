@@ -205,33 +205,118 @@ function instantiateEmbedding(recipe: Recipe, modelId: string, cfg: AIGatewayCon
   }
 }
 
-/** Embed many texts. Truncates to 8000 chars. Throws AIConfigError or AITransientError. */
+/**
+ * Conservative chars-to-tokens ratio for batch budget estimation.
+ * Voyage's tokenizer runs ~3-4× denser than OpenAI tiktoken on mixed
+ * content (code, markdown, conversation). Using 1 char ≈ 1 token is
+ * intentionally pessimistic to avoid hitting provider batch limits.
+ */
+const CHARS_PER_TOKEN_ESTIMATE = 1;
+
+/** Minimum sub-batch size before we give up splitting and just throw. */
+const MIN_SUB_BATCH = 1;
+
+/** Embed many texts. Truncates to 8000 chars. Auto-splits for providers with batch limits. */
 export async function embed(texts: string[]): Promise<Float32Array[]> {
   if (!texts || texts.length === 0) return [];
 
   const cfg = requireConfig();
   const { model, recipe, modelId } = await resolveEmbeddingProvider(getEmbeddingModel());
   const truncated = texts.map(t => (t ?? '').slice(0, MAX_CHARS));
+  const providerOpts = dimsProviderOptions(recipe.implementation, modelId, cfg.embedding_dimensions ?? DEFAULT_EMBEDDING_DIMENSIONS);
+  const expected = cfg.embedding_dimensions ?? DEFAULT_EMBEDDING_DIMENSIONS;
 
+  // Determine batch token budget from recipe (if provider declares one).
+  const maxBatchTokens = recipe.touchpoints?.embedding?.max_batch_tokens;
+
+  // Split into sub-batches if the provider has a token budget.
+  const batches = maxBatchTokens
+    ? splitByTokenBudget(truncated, maxBatchTokens)
+    : [truncated];
+
+  const allEmbeddings: Float32Array[] = [];
+
+  for (const batch of batches) {
+    const result = await embedSubBatch(batch, model, providerOpts, expected, recipe, modelId);
+    allEmbeddings.push(...result);
+  }
+
+  return allEmbeddings;
+}
+
+/**
+ * Split texts into sub-batches that stay under the provider's token budget.
+ * Uses a conservative chars-to-tokens estimate (1:1) since different
+ * providers' tokenizers vary widely.
+ */
+function splitByTokenBudget(texts: string[], maxTokens: number): string[][] {
+  // Use 80% of declared limit as safety margin for tokenizer variance.
+  const budget = Math.floor(maxTokens * 0.8);
+  const batches: string[][] = [];
+  let current: string[] = [];
+  let currentTokens = 0;
+
+  for (const text of texts) {
+    const estTokens = Math.ceil(text.length / CHARS_PER_TOKEN_ESTIMATE);
+    if (current.length > 0 && currentTokens + estTokens > budget) {
+      batches.push(current);
+      current = [];
+      currentTokens = 0;
+    }
+    current.push(text);
+    currentTokens += estTokens;
+  }
+  if (current.length > 0) batches.push(current);
+
+  return batches;
+}
+
+/** Returns true if the error looks like a provider batch-token-limit error. */
+function isTokenLimitError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    /max.*allowed.*tokens.*batch/i.test(msg) ||
+    /batch.*too.*many.*tokens/i.test(msg) ||
+    /token.*limit.*exceeded/i.test(msg)
+  );
+}
+
+/**
+ * Embed a single sub-batch with automatic halving on token-limit errors.
+ * If the batch is already at MIN_SUB_BATCH and still fails, throws.
+ */
+async function embedSubBatch(
+  texts: string[],
+  model: any,
+  providerOpts: any,
+  expectedDims: number,
+  recipe: Recipe,
+  modelId: string,
+): Promise<Float32Array[]> {
   try {
     const result = await embedMany({
       model,
-      values: truncated,
-      providerOptions: dimsProviderOptions(recipe.implementation, modelId, cfg.embedding_dimensions ?? DEFAULT_EMBEDDING_DIMENSIONS),
+      values: texts,
+      providerOptions: providerOpts,
     });
 
-    // Verify dims match expectation; mismatch = likely misconfigured provider options.
-    const expected = cfg.embedding_dimensions ?? DEFAULT_EMBEDDING_DIMENSIONS;
     const first = result.embeddings?.[0];
-    if (first && Array.isArray(first) && first.length !== expected) {
+    if (first && Array.isArray(first) && first.length !== expectedDims) {
       throw new AIConfigError(
-        `Embedding dim mismatch: model ${modelId} returned ${first.length} but schema expects ${expected}.`,
+        `Embedding dim mismatch: model ${modelId} returned ${first.length} but schema expects ${expectedDims}.`,
         `Run \`gbrain migrate --embedding-model ${getEmbeddingModel()} --embedding-dimensions ${first.length}\` or change models.`,
       );
     }
 
     return result.embeddings.map((e: number[]) => new Float32Array(e));
   } catch (err) {
+    // On token-limit error, try splitting the batch in half and retrying.
+    if (isTokenLimitError(err) && texts.length > MIN_SUB_BATCH) {
+      const mid = Math.ceil(texts.length / 2);
+      const left = await embedSubBatch(texts.slice(0, mid), model, providerOpts, expectedDims, recipe, modelId);
+      const right = await embedSubBatch(texts.slice(mid), model, providerOpts, expectedDims, recipe, modelId);
+      return [...left, ...right];
+    }
     throw normalizeAIError(err, `embed(${recipe.id}:${modelId})`);
   }
 }
