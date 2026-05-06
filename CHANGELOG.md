@@ -2,6 +2,184 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.28.2] - 2026-05-06
+
+**Register a remote git URL as a brain source over HTTP MCP.**
+**Least-privilege OAuth: scoped tokens for sources management without admin keys.**
+
+If your brain runs on a server (Tailscale-reachable, Cloudflare-tunneled,
+on-prem), you can now point any MCP client at the brain and add a federated
+source by URL — no SSH into the brain host. `gbrain sources add --url
+https://github.com/your-org/notes` clones, registers, and syncs in one
+call. The clone lives at a predictable path; if it gets autopurged the
+next sync re-clones it. The whole flow is also exposed as MCP ops, so
+gstack and similar agents can wire up the source automatically.
+
+The OAuth scope hierarchy got two new tiers (`sources_admin`,
+`users_admin`) so you can mint tokens that manage sources without granting
+admin to your pages. Tokens stay least-privilege; refresh and discovery
+work end to end.
+
+### What you can do that you couldn't before
+
+- **`gbrain sources add --url <https-url>`** — clones a remote git repo
+  into `$GBRAIN_HOME/clones/<id>/`, registers it as a federated source,
+  and stores the URL so future syncs auto-recover from a missing clone.
+- **`whoami` MCP op** — any authenticated client can introspect itself:
+  `{transport, client_id, scopes, expires_at}`. Lets agents detect what
+  capabilities they have without trial-and-error against every other op.
+- **`sources_add`, `sources_list`, `sources_remove`, `sources_status`
+  MCP ops** — full source lifecycle over HTTP MCP. `sources_status`
+  returns a `clone_state` field (`healthy | missing | no-git | url-drift
+  | corrupted`) so a remote agent can diagnose a busted clone without
+  SSH.
+- **Scoped tokens** — `gbrain auth register-client X --scopes "read
+  sources_admin"` mints a token that can manage federated sources without
+  page-write or admin access. The OAuth allowlist rejects bogus scope
+  strings at registration time.
+- **Auto-recovery on sync** — if your `$GBRAIN_HOME/clones/<id>/`
+  directory gets deleted (operator cleanup, disk move, host migration),
+  the next `gbrain sync --source <id>` re-clones from the recorded URL
+  and continues.
+- **`gbrain doctor` orphan-clones check** — surfaces stale temp dirs in
+  `$GBRAIN_HOME/clones/.tmp/` so a SIGKILL'd `add --url` doesn't quietly
+  fill your disk over months.
+
+### Numbers that matter
+
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| MCP ops registered | 44 | 49 | +5 (whoami + sources_*) |
+| OAuth scopes advertised | 3 | 5 | +2 (sources_admin, users_admin) |
+| `/setup-gbrain` Path 4 manual SSH steps | 4 | 0 | -4 |
+| Lines of new test coverage | 0 | ~1500 | (8 new test files) |
+
+The 4-to-0 SSH-step number is the gstack `/setup-gbrain` flow: previously
+the operator had to ssh into the brain host, run `gbrain sources add
+--path <local clone>`, and re-register. Post-v0.28.2 that's a single
+`sources_add` MCP call from any agent with `sources_admin` scope.
+
+### What this means for you
+
+If you run a personal brain on your laptop, this is invisible — `gbrain
+upgrade` and you keep working. If you run a brain on a server that other
+agents talk to over HTTP MCP (Tailscale node, Cloudflare tunnel, lab
+host), this is the v0.28 release that lets you wire those agents up
+without ever opening an SSH session. Mint a `sources_admin` token, hand
+it to the agent, the agent does the rest.
+
+### To take advantage of v0.28.2
+
+`gbrain upgrade` should do this automatically. If you're running a
+gbrain HTTP server, also rebuild the admin SPA so the Register modal
+shows the new scope checkboxes:
+
+```bash
+gbrain upgrade
+cd admin && bun install && bun run build
+git add admin/dist/ && git commit -m "chore: rebuild admin SPA"
+```
+
+Then mint a scoped token and verify `/.well-known/oauth-authorization-server`
+advertises all 5 scopes:
+
+```bash
+gbrain auth register-client gstack-test \
+  --grant-types client_credentials \
+  --scopes "read sources_admin"
+curl http://your-brain-host/.well-known/oauth-authorization-server | jq .scopes_supported
+# expect: ["admin","read","sources_admin","users_admin","write"]
+```
+
+If anything looks wrong, please file an issue:
+https://github.com/garrytan/gbrain/issues with:
+- output of `gbrain doctor`
+- which step broke
+
+### Itemized changes
+
+**New: `gbrain sources add --url`** — HTTPS-only remote source registration
+with SSRF defenses and atomic clone (temp-dir + rename + rollback). Internal
+URL classification reuses `isInternalUrl` from `src/core/url-safety.ts`
+(extracted from `integrations.ts` so SSRF gates stay DRY across the
+codebase). `git clone` runs with redirects disabled, submodule recursion
+disabled, and no external protocol helpers — closes the bypass surfaces
+that survive a naive private-IP filter.
+
+**New: `whoami` + `sources_*` MCP ops** — five new ops auto-flow through
+the existing tool-defs surface. `whoami` returns a `transport` field
+(`oauth | legacy | local`) and throws `unknown_transport` when the
+context is ambiguous (preserves the v0.26.9 fail-closed posture).
+`sources_*` ops use `sources_admin` scope so a token with that scope
+can register and remove sources but cannot write pages.
+
+**New: scope hierarchy + allowlist (`src/core/scope.ts`)** — `hasScope`
+helper replaces exact-string-match at four enforcement sites. `admin`
+implies all; `write` implies `read`; `sources_admin` and `users_admin`
+are siblings. `ALLOWED_SCOPES` is validated at registration time
+(CLI + DCR /register + manual). Pre-allowlist clients keep working.
+
+**New: doctor `orphan_clones` check + `purge` phase substep** — surfaces
+stale `.tmp/` clone dirs older than 24h; the autopilot purge phase nukes
+them on the same TTL as page soft-deletes (72h).
+
+**Sync auto-recovery** — `performSync` now classifies the on-disk clone
+state via `validateRepoState`. If the clone is missing/no-git/not-a-dir,
+it re-clones from `config.remote_url`. If corrupted or url-drift, it
+refuses with structured hints rather than syncing wrong state.
+
+**Symlink-safe clone cleanup** — `sources_remove` uses realpath+lstat
+confinement (matching `validateUploadPath`) before `rm -rf`. String
+prefix match would let a malicious symlink resolve out of the
+$GBRAIN_HOME/clones/ confine.
+
+**OAuth metadata** — `/.well-known/oauth-authorization-server` advertises
+all 5 scopes so MCP clients (Claude Desktop, ChatGPT, Perplexity) discover
+the new tiers via standard OAuth discovery.
+
+**Admin SPA** — Register Client modal sources its scope checkbox set from
+`admin/src/lib/scope-constants.ts`, a hand-maintained mirror of
+`src/core/scope.ts`. `scripts/check-admin-scope-drift.sh` fails the build
+if the two diverge — wired into `bun run verify`.
+
+### Codex hardening pass (pre-ship adversarial review)
+
+The pre-ship adversarial review caught five issues that landed alongside the
+core feature:
+
+- `sources_admin` tokens over HTTP MCP can no longer override `path` or
+  `clone_dir`. Those flags were a privilege escalation primitive: a remote
+  caller with the new scope could plant repo content at any host path,
+  and the auto-recovery branch's `rm -rf` on degraded state turned that
+  into arbitrary delete. Local CLI keeps the override (operator trust);
+  remote callers get the safe default `$GBRAIN_HOME/clones/<id>/` and a
+  warn log when they tried.
+- Steady-state `git pull --ff-only` now routes through the same SSRF-defensive
+  flag set as the initial clone. The legacy helper at `src/commands/sync.ts:192`
+  was spawning git without `-c http.followRedirects=false -c protocol.{file,ext}.allow=never --no-recurse-submodules`,
+  so every recurring sync was reopening the redirect/submodule/protocol
+  bypass that `cloneRepo` closed.
+- `sources_list` honors `include_archived: false` (the default). Archived
+  sources' ids, local_paths, and remote_urls were leaking to read-scoped
+  callers regardless of the flag.
+- `parseRemoteUrl` blocks IPv6 ULA `fc00::/7` and link-local `fe80::/10`.
+  Previously only `::1` / `::` and IPv4-mapped IPv6 were rejected.
+- DNS rebinding defense filed as a v0.28.x follow-up TODO. The current
+  gate is lexical only; a deliberate attacker with DNS control can still
+  resolve a public hostname to an internal IP. Closing this needs async
+  DNS resolution + revalidation.
+
+### For contributors
+
+- `src/core/url-safety.ts` extracted from `integrations.ts` for cross-layer
+  reuse. `src/commands/integrations.ts` re-exports the same names so
+  existing test imports work unchanged.
+- `src/core/sources-ops.ts` houses the pure-function source-management
+  surface that both the CLI and the new MCP ops call into. Atomicity
+  contract documented in the file header.
+- `bun run check:admin-scope-drift` — new gate; fails the build if
+  `admin/src/lib/scope-constants.ts` falls behind `src/core/scope.ts`.
+
 ## [0.28.0] - 2026-05-01
 
 **The brain finally captures what you BELIEVE, not just what's true.**
