@@ -76,6 +76,12 @@ const REQUIRED_BOOTSTRAP_COVERAGE: ForwardReference[] = [
   // v0.26.3 (v33) — forward-referenced by `CREATE INDEX idx_mcp_log_agent_time
   // ON mcp_request_log(agent_name, created_at DESC)`.
   { kind: 'column', table: 'mcp_request_log', column: 'agent_name' },
+  // v0.27 (v36) — forward-referenced by `CREATE INDEX
+  // idx_subagent_messages_provider ON subagent_messages (job_id, provider_id)`.
+  // Composite-index second column; the array-based test pattern misses these
+  // by default, which is why this fix wave's Step 3 replaces this with a
+  // SQL parser that extracts every column referenced by any DDL.
+  { kind: 'column', table: 'subagent_messages', column: 'provider_id' },
 ];
 
 test('applyForwardReferenceBootstrap covers every forward reference declared in REQUIRED_BOOTSTRAP_COVERAGE', async () => {
@@ -122,6 +128,9 @@ test('applyForwardReferenceBootstrap covers every forward reference declared in 
       ALTER TABLE mcp_request_log DROP COLUMN IF EXISTS agent_name;
       ALTER TABLE mcp_request_log DROP COLUMN IF EXISTS params;
       ALTER TABLE mcp_request_log DROP COLUMN IF EXISTS error_message;
+
+      DROP INDEX IF EXISTS idx_subagent_messages_provider;
+      ALTER TABLE subagent_messages DROP COLUMN IF EXISTS provider_id;
     `);
 
     // Run bootstrap in isolation (NOT initSchema). This is what we're testing.
