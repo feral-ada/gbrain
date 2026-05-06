@@ -404,7 +404,15 @@ CREATE TABLE IF NOT EXISTS eval_candidates (
   remote                BOOLEAN      NOT NULL,
   job_id                INTEGER,
   subagent_id           INTEGER,
-  created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+  created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  -- v0.29.1 — agent-explicit recency + salience capture for replay (mirrors src/schema.sql).
+  as_of_ts              TIMESTAMPTZ,
+  salience_param        TEXT,
+  recency_param         TEXT,
+  salience_resolved     TEXT,
+  recency_resolved      TEXT,
+  salience_source       TEXT,
+  recency_source        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_eval_candidates_created_at ON eval_candidates(created_at DESC);
 
