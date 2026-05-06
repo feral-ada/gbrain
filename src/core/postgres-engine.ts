@@ -2326,24 +2326,34 @@ export class PostgresEngine implements BrainEngine {
     const prefixCondition = slugPrefix
       ? sql`AND p.slug LIKE ${slugPrefix.replace(/[\\%_]/g, (c) => '\\' + c) + '%'} ESCAPE '\\'`
       : sql``;
-    // v0.29.1: the third score term moves from inline `1.0 / (1 + days_old)`
-    // into buildRecencyComponentSql with a "flat" decay map (halflife=1d,
-    // coefficient=1.0; same numeric output as v0.29.0). Commit 7 adds an
-    // opt-in `recency_bias='on'` param that swaps this for the per-prefix
-    // map, but the default (this commit) preserves v0.29.0 behavior verbatim.
-    const flatRecency = buildRecencyComponentSql({
-      slugColumn: 'p.slug',
-      dateExpr: 'p.updated_at',
-      decayMap: {},
-      fallback: { halflifeDays: 1, coefficient: 1.0 },
-    });
+    // v0.29.1: third score term via buildRecencyComponentSql. Default
+    // 'flat' = v0.29.0 behavior (1 / (1 + days_old)). 'on' opts into the
+    // per-prefix decay map (concepts/ evergreen, daily/ aggressive, etc.).
+    const recencyBias = opts.recency_bias ?? 'flat';
+    let recencySql: string;
+    if (recencyBias === 'on') {
+      const { resolveRecencyDecayMap, DEFAULT_FALLBACK } = await import('./search/recency-decay.ts');
+      recencySql = buildRecencyComponentSql({
+        slugColumn: 'p.slug',
+        dateExpr: 'COALESCE(p.effective_date, p.updated_at)',
+        decayMap: resolveRecencyDecayMap(),
+        fallback: DEFAULT_FALLBACK,
+      });
+    } else {
+      recencySql = buildRecencyComponentSql({
+        slugColumn: 'p.slug',
+        dateExpr: 'p.updated_at',
+        decayMap: {},
+        fallback: { halflifeDays: 1, coefficient: 1.0 },
+      });
+    }
     const rows = await sql`
       SELECT p.slug, p.source_id, p.title, p.type, p.updated_at, p.emotional_weight,
              COUNT(DISTINCT t.id) AS take_count,
              COALESCE(AVG(t.weight), 0) AS take_avg_weight,
              (p.emotional_weight * 5)
                + ln(1 + COUNT(DISTINCT t.id))
-               + ${sql.unsafe(flatRecency)}
+               + ${sql.unsafe(recencySql)}
                AS score
         FROM pages p
         LEFT JOIN takes t ON t.page_id = p.id AND t.active = TRUE

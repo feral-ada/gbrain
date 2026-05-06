@@ -1747,12 +1747,28 @@ const get_recent_salience: Operation = {
       type: 'string',
       description: "Optional slug-prefix filter, e.g. 'personal' or 'wiki/people'.",
     },
+    recency_bias: {
+      type: 'string',
+      enum: ['flat', 'on'],
+      description:
+        "v0.29.1: how to weight recency in the salience score.\n" +
+        "  'flat' (DEFAULT) — v0.29.0 behavior. Every page gets 1/(1+days_old).\n" +
+        "                     Stable, predictable; what most callers want.\n" +
+        "  'on'             — Per-prefix decay map. concepts/originals/writing/\n" +
+        "                     become evergreen (recency component = 0); daily/,\n" +
+        "                     media/x/, chat/ decay aggressively. Use when the\n" +
+        "                     user explicitly biases for recency-aware salience\n" +
+        "                     ('what's been salient lately' vs 'what matters\n" +
+        "                     in this brain regardless of when').",
+    },
   },
   handler: async (ctx, p) => {
+    const recencyBias = p.recency_bias === 'on' ? 'on' : 'flat';
     return ctx.engine.getRecentSalience({
       days: typeof p.days === 'number' ? p.days : undefined,
       limit: typeof p.limit === 'number' ? p.limit : undefined,
       slugPrefix: typeof p.slugPrefix === 'string' ? p.slugPrefix : undefined,
+      recency_bias: recencyBias,
     });
   },
   cliHints: { name: 'salience' },

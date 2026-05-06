@@ -152,6 +152,15 @@ export interface SalienceOpts {
   limit?: number;
   /** Optional slug-prefix filter (e.g., `personal`, `wiki/people`). */
   slugPrefix?: string;
+  /**
+   * v0.29.1 — recency-decay treatment for the salience formula's third term.
+   *   - 'flat' (default): v0.29.0 behavior, `1.0 / (1 + days_old)` for every page
+   *   - 'on': per-prefix decay from DEFAULT_RECENCY_DECAY (concepts/originals
+   *     evergreen; daily/, media/x/ aggressive). Use when the agent wants
+   *     "recency-biased salience" — what's been mattering AND fresh.
+   * Default preserves v0.29.0 ranking; 'on' is opt-in.
+   */
+  recency_bias?: 'flat' | 'on';
 }
 
 export interface SalienceResult {

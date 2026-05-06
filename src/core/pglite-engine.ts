@@ -2241,22 +2241,33 @@ export class PGLiteEngine implements BrainEngine {
     params.push(limit);
     const limitParam = `$${params.length}`;
 
-    // v0.29.1: third score term via buildRecencyComponentSql with a "flat"
-    // decay map (halflife=1d, coefficient=1.0) — same numeric output as
-    // v0.29.0's inline `1.0 / (1 + days_old)`. Mirror of postgres-engine.ts.
-    const flatRecency = buildRecencyComponentSql({
-      slugColumn: 'p.slug',
-      dateExpr: 'p.updated_at',
-      decayMap: {},
-      fallback: { halflifeDays: 1, coefficient: 1.0 },
-    });
+    // v0.29.1: third score term via buildRecencyComponentSql. Default
+    // 'flat' = v0.29.0 behavior. 'on' opts into per-prefix decay.
+    const recencyBias = opts.recency_bias ?? 'flat';
+    let recencySql: string;
+    if (recencyBias === 'on') {
+      const { resolveRecencyDecayMap, DEFAULT_FALLBACK } = await import('./search/recency-decay.ts');
+      recencySql = buildRecencyComponentSql({
+        slugColumn: 'p.slug',
+        dateExpr: 'COALESCE(p.effective_date, p.updated_at)',
+        decayMap: resolveRecencyDecayMap(),
+        fallback: DEFAULT_FALLBACK,
+      });
+    } else {
+      recencySql = buildRecencyComponentSql({
+        slugColumn: 'p.slug',
+        dateExpr: 'p.updated_at',
+        decayMap: {},
+        fallback: { halflifeDays: 1, coefficient: 1.0 },
+      });
+    }
     const { rows } = await this.db.query(
       `SELECT p.slug, p.source_id, p.title, p.type, p.updated_at, p.emotional_weight,
               COUNT(DISTINCT t.id) AS take_count,
               COALESCE(AVG(t.weight), 0) AS take_avg_weight,
               (p.emotional_weight * 5)
                 + ln(1 + COUNT(DISTINCT t.id))
-                + ${flatRecency}
+                + ${recencySql}
                 AS score
          FROM pages p
          LEFT JOIN takes t ON t.page_id = p.id AND t.active = TRUE
