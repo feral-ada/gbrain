@@ -619,6 +619,80 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
     checks.push({ name: 'embeddings', status: 'warn', message: 'Could not check embedding health' });
   }
 
+  // 8b. Embedding provider eval — live smoke test of the configured provider.
+  //     Verifies: correct model, API key works, dimensions match config, DB column matches.
+  progress.heartbeat('embedding_provider');
+  try {
+    const {
+      getEmbeddingModel,
+      getEmbeddingDimensions,
+      embedOne,
+      isAvailable,
+    } = await import('../core/ai/gateway.ts');
+
+    const configuredModel = getEmbeddingModel();
+    const configuredDims = getEmbeddingDimensions();
+    const available = isAvailable('embedding');
+
+    if (!available) {
+      // Per v0.28.5 plan P1: silently skipped when no API key is configured.
+      // Doctor must stay green on CI / local-only / offline environments where
+      // a full provider probe isn't possible. The skipped status is still
+      // visible in --json output so operators can see it ran.
+      checks.push({
+        name: 'embedding_provider',
+        status: 'ok',
+        message: `Skipped (no provider credentials). Model: ${configuredModel}.`,
+      });
+    } else {
+      // Live embed test
+      const start = Date.now();
+      const vec = await embedOne('gbrain doctor embedding smoke test');
+      const ms = Date.now() - start;
+      const actualDims = vec.length;
+
+      const issues: string[] = [];
+
+      // Check dimensions match config
+      if (actualDims !== configuredDims) {
+        issues.push(`Dimension mismatch: provider returned ${actualDims} but config expects ${configuredDims}`);
+      }
+
+      // Check DB column dimensions match (engine-portable; works on both
+      // Postgres and PGLite via the shared dim-check helper added in v0.28.5).
+      try {
+        const { readContentChunksEmbeddingDim } = await import('../core/embedding-dim-check.ts');
+        const colDim = await readContentChunksEmbeddingDim(engine);
+        if (colDim.exists && colDim.dims !== null && colDim.dims !== actualDims) {
+          issues.push(`DB dimension mismatch: column is vector(${colDim.dims}) but provider returns ${actualDims}-dim. See docs/embedding-migrations.md for the manual ALTER recipe.`);
+        }
+      } catch { /* column or table missing — fresh brain, fine */ }
+
+      if (issues.length > 0) {
+        checks.push({
+          name: 'embedding_provider',
+          status: 'warn',
+          message: `${configuredModel} responds (${ms}ms, ${actualDims} dims) but: ${issues.join('; ')}`,
+        });
+      } else {
+        checks.push({
+          name: 'embedding_provider',
+          status: 'ok',
+          message: `${configuredModel} ✓ ${ms}ms, ${actualDims} dims, DB aligned`,
+        });
+      }
+    }
+  } catch (e: any) {
+    // Per v0.28.5 plan P1: non-fatal on network failure. The probe surfaces
+    // the issue but doesn't fail doctor — common cases (rate limit, transient
+    // 5xx, DNS blip, expired key) shouldn't take down a CI run.
+    checks.push({
+      name: 'embedding_provider',
+      status: 'warn',
+      message: `Embedding provider probe failed: ${e.message?.slice(0, 200) ?? e}`,
+    });
+  }
+
   // 9. Graph health (link + timeline coverage on entity pages).
   // dead_links removed in v0.10.1: ON DELETE CASCADE on link FKs makes it always 0.
   progress.heartbeat('graph_coverage');
