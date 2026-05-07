@@ -4,7 +4,7 @@ import { installSigchldHandler } from './core/zombie-reap.ts';
 installSigchldHandler();
 
 import { readFileSync } from 'fs';
-import { loadConfig, toEngineConfig } from './core/config.ts';
+import { loadConfig, toEngineConfig, isThinClient } from './core/config.ts';
 import type { BrainEngine } from './core/engine.ts';
 import { operations, OperationError } from './core/operations.ts';
 import type { Operation, OperationContext } from './core/operations.ts';
@@ -261,7 +261,39 @@ function formatResult(opName: string, result: unknown): string {
   }
 }
 
+/**
+ * Multi-topology v1: thin-client refusal set. These commands require a local
+ * engine; if `~/.gbrain/config.json` has `remote_mcp` set, the dispatch guard
+ * refuses them with a canonical error pointing at the remote host. The check
+ * runs before per-command dispatch so the error message is consistent.
+ *
+ * `serve` is in this set because `gbrain serve` (stdio or http) requires a
+ * local engine to expose. Thin clients don't have one to expose.
+ *
+ * `doctor` is intentionally NOT in this set — task 4 routes it to
+ * `runRemoteDoctor` for thin-client installs.
+ */
+const THIN_CLIENT_REFUSED_COMMANDS = new Set([
+  'sync', 'embed', 'extract', 'migrate', 'apply-migrations',
+  'repair-jsonb', 'orphans', 'integrity', 'serve',
+]);
+
 async function handleCliOnly(command: string, args: string[]) {
+  // Thin-client guard: refuse DB-bound commands cleanly with a single
+  // canonical message instead of letting them fail later inside connectEngine
+  // or mid-handler. See `THIN_CLIENT_REFUSED_COMMANDS` above.
+  if (THIN_CLIENT_REFUSED_COMMANDS.has(command)) {
+    const cfg = loadConfig();
+    if (isThinClient(cfg)) {
+      const url = cfg!.remote_mcp!.mcp_url;
+      console.error(
+        `\`gbrain ${command}\` requires a local engine. This install is a thin client of ${url}.\n` +
+        `Run \`${command}\` on the remote host, or use the corresponding MCP tool from your agent.`,
+      );
+      process.exit(1);
+    }
+  }
+
   // Commands that don't need a database connection
   if (command === 'init') {
     const { runInit } = await import('./commands/init.ts');
@@ -399,6 +431,17 @@ async function handleCliOnly(command: string, args: string[]) {
     return;
   }
   if (command === 'doctor') {
+    // Multi-topology v1: thin-client doctor. When `~/.gbrain/config.json`
+    // has remote_mcp set, every DB-bound check is irrelevant. Route to the
+    // outbound-HTTP probe set in `src/core/doctor-remote.ts` and return
+    // before any local-engine work.
+    const cfgForDoctor = loadConfig();
+    if (isThinClient(cfgForDoctor)) {
+      const { runRemoteDoctor } = await import('./core/doctor-remote.ts');
+      await runRemoteDoctor(cfgForDoctor!, args);
+      return;
+    }
+
     // Doctor runs filesystem checks first (no DB needed), then DB checks.
     // --fast skips DB checks entirely.
     const { runDoctor } = await import('./commands/doctor.ts');
