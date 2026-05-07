@@ -275,8 +275,9 @@ export async function hybridSearch(
     recency: recencyMode,
   };
 
-  // Skip vector search entirely if no OpenAI key is configured
-  if (!process.env.OPENAI_API_KEY) {
+  // Skip vector search entirely if the gateway has no embedding provider configured (Codex C3).
+  const { isAvailable } = await import('../ai/gateway.ts');
+  if (!isAvailable('embedding')) {
     if (keywordResults.length > 0) {
       await runPostFusionStages(engine, keywordResults, postFusionOpts);
       keywordResults.sort((a, b) => b.score - a.score);
