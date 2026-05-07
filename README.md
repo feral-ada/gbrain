@@ -10,7 +10,7 @@ GBrain is those patterns, generalized. 34 skills. Install in 30 minutes. Your ag
 
 **New in v0.25.0 — BrainBench-Real (session capture, contributor opt-in):** with `GBRAIN_CONTRIBUTOR_MODE=1` set in your shell, every real `query` + `search` call through MCP, CLI, or the subagent tool-bridge gets captured (PII-scrubbed) into an `eval_candidates` table. Snapshot with `gbrain eval export`, replay against your code change with `gbrain eval replay`. Three numbers come back: mean Jaccard@k between captured and current retrieved slugs, top-1 stability, and latency Δ. **Off by default** for production users — no surprise data accumulation. Walkthrough: [docs/eval-bench.md](docs/eval-bench.md). NDJSON wire format: [docs/eval-capture.md](docs/eval-capture.md).
 
-**New in v0.28.1 — LongMemEval in the box:** `gbrain eval longmemeval <dataset.jsonl>` runs the public [LongMemEval](https://huggingface.co/datasets/xiaowu0162/longmemeval) benchmark against gbrain's hybrid retrieval. One in-memory PGLite per run, `TRUNCATE` between questions (runtime-enumerated tables, schema-migration-safe), 25.9ms p50 per question on Apple Silicon. Your `~/.gbrain` brain is never touched. Retrieved chat content is sanitized with the same `INJECTION_PATTERNS` that protect takes — one source of truth for prompt-injection defense. Hand the JSONL output to LongMemEval's `evaluate_qa.py` to score.
+**New in v0.28.8 — LongMemEval in the box:** `gbrain eval longmemeval <dataset.jsonl>` runs the public [LongMemEval](https://huggingface.co/datasets/xiaowu0162/longmemeval) benchmark against gbrain's hybrid retrieval. One in-memory PGLite per run, `TRUNCATE` between questions (runtime-enumerated tables, schema-migration-safe), 25.9ms p50 per question on Apple Silicon. Your `~/.gbrain` brain is never touched. Retrieved chat content is sanitized with the same `INJECTION_PATTERNS` that protect takes — one source of truth for prompt-injection defense. Hand the JSONL output to LongMemEval's `evaluate_qa.py` to score.
 
 > **~30 minutes to a fully working brain.** Database ready in 2 seconds (PGLite, no server). You just answer questions about API keys.
 
@@ -441,6 +441,7 @@ GBrain ships integration recipes that your agent sets up for you. Each recipe te
 | [X-to-Brain](recipes/x-to-brain.md) | — | Twitter timeline + mentions + deletions |
 | [Calendar-to-Brain](recipes/calendar-to-brain.md) | credential-gateway | Google Calendar to searchable daily pages |
 | [Meeting Sync](recipes/meeting-sync.md) | — | Circleback transcripts to brain pages with attendees |
+| [Restart Sweep](recipes/restart-sweep.md) | OpenClaw + Telegram | Detect dropped Telegram messages after OpenClaw gateway restarts |
 
 **Data research recipes** extract structured data from email into tracked brain pages. Built-in recipes for investor updates (MRR, ARR, runway, headcount), expense tracking, and company metrics. Create your own with `gbrain research init`.
 
@@ -728,7 +729,7 @@ EVAL
   gbrain eval export [--since DUR]      Stream captured eval_candidates as NDJSON (BrainBench-Real)
   gbrain eval prune --older-than DUR    Retention cleanup for eval_candidates (requires window)
   gbrain eval replay --against FILE     Replay captured queries vs current build (Jaccard@k, top-1, latency Δ)
-  gbrain eval longmemeval <dataset>     Run public LongMemEval against gbrain hybrid retrieval (v0.28.1)
+  gbrain eval longmemeval <dataset>     Run public LongMemEval against gbrain hybrid retrieval (v0.28.8)
                                         [--limit N] [--retrieval-only] [--keyword-only] [--expansion]
                                         [--top-k K] [--model M] [--output FILE]
 
@@ -740,7 +741,7 @@ ADMIN
   gbrain serve                          MCP server (stdio)
   gbrain serve --http [--port 3131]     HTTP MCP server with OAuth 2.1 + admin dashboard
                                         [--token-ttl 3600] [--enable-dcr]
-                                        [--public-url URL]
+                                        [--public-url URL] [--log-full-params]
   gbrain auth create|list|revoke|test   Legacy bearer token management
   gbrain auth register-client <name>    Register an OAuth 2.1 client
         --grant-types client_credentials,authorization_code
@@ -798,7 +799,7 @@ The skills in this repo are those patterns, generalized. What took 11 days to bu
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Run `bun test` for unit tests. For the full local CI gate (gitleaks + unit + all 29 E2E files in Docker, the same checks GH Actions runs), use `bun run ci:local` ... or `bun run ci:local:diff` for the diff-aware subset during fast iteration.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Run `bun run test` for the parallel unit-test fast loop (~85s on a Mac dev box, 3700+ tests) or `bun run verify` for the pre-push gate (privacy + jsonb + progress + test-isolation + wasm + admin-build + typecheck). For the full local CI gate (gitleaks + unit + all 29 E2E files in Docker, the same checks GH Actions runs), use `bun run ci:local` ... or `bun run ci:local:diff` for the diff-aware subset during fast iteration.
 
 If you're working on retrieval or any of the search/embedding/ranking surface, set `GBRAIN_CONTRIBUTOR_MODE=1` in your shell rc and use `gbrain eval replay` to gate your changes against a snapshot of real captured queries — the dev loop is documented in [`docs/eval-bench.md`](docs/eval-bench.md). Capture is **off by default** for production users (no surprise data accumulation); the env var is the contributor opt-in.
 

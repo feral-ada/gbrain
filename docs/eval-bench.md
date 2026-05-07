@@ -99,7 +99,7 @@ retrieval, and which queries did it move most?"
 
 For a third evaluation axis — public benchmark, ground-truth labels, full
 question-answer pipeline (not just retrieval) — `gbrain eval longmemeval
-<dataset.jsonl>` (v0.28.1) runs the LongMemEval benchmark against gbrain's
+<dataset.jsonl>` (v0.28.8) runs the LongMemEval benchmark against gbrain's
 hybrid retrieval. Each question gets a clean in-memory PGLite, its haystack
 imported, the question asked, the hypothesis emitted as JSONL — exactly the
 shape LongMemEval's `evaluate_qa.py` consumes. Your `~/.gbrain` brain is
@@ -231,7 +231,7 @@ Existing `eval_candidates` rows stay until you `gbrain eval prune
 | `rows_errored > 0` | One or more queries threw. Inspect first 3 in human output, or `--json` to see all `error_message` fields |
 | Many `skipped: empty query` | Capture ran on rows where someone passed empty `query` — check why those were captured |
 
-## Public benchmarks: LongMemEval (v0.28.1)
+## Public benchmarks: LongMemEval (v0.28.8)
 
 `gbrain eval longmemeval` runs the public [LongMemEval](https://huggingface.co/datasets/xiaowu0162/longmemeval)
 benchmark directly against gbrain's hybrid retrieval. Different evaluation
