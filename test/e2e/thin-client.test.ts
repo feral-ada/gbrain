@@ -24,7 +24,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 
 function test(name: string, fn: () => void | Promise<unknown>): void {
-  testRaw(name, fn, 60000);
+  testRaw(name, fn, 120000);
 }
 
 const CLI = join(__dirname, '..', '..', 'src', 'cli.ts');
@@ -111,17 +111,28 @@ describeWhen('thin-client end-to-end (requires DATABASE_URL)', () => {
     const reg = await spawn([
       'auth', 'register-client', 'thin-client-test',
       '--grant-types', 'client_credentials',
-      '--scopes', 'read,write,admin',
-      '--json',
+      '--scopes', 'read write admin',
     ], hostHome);
     if (reg.exitCode !== 0) throw new Error(`register-client failed: ${reg.stderr || reg.stdout}`);
-    const regJson = JSON.parse(reg.stdout.trim().split('\n').pop()!);
-    clientId = regJson.client_id;
-    clientSecret = regJson.client_secret;
+    const parsed = parseRegisterClientOutput(reg.stdout);
+    clientId = parsed.clientId;
+    clientSecret = parsed.clientSecret;
     if (!clientId || !clientSecret) {
-      throw new Error(`register-client returned unexpected JSON shape: ${reg.stdout}`);
+      throw new Error(`register-client returned unexpected output: ${reg.stdout}`);
     }
   });
+
+  function parseRegisterClientOutput(out: string): { clientId: string; clientSecret: string } {
+    // `gbrain auth register-client` doesn't have --json; parse human output:
+    //   Client ID:     <id>
+    //   Client Secret: <secret>
+    const idMatch = out.match(/Client ID:\s*(\S+)/);
+    const secretMatch = out.match(/Client Secret:\s*(\S+)/);
+    return {
+      clientId: idMatch?.[1] ?? '',
+      clientSecret: secretMatch?.[1] ?? '',
+    };
+  }
 
   afterAll(async () => {
     if (serverProc) {
@@ -175,5 +186,90 @@ describeWhen('thin-client end-to-end (requires DATABASE_URL)', () => {
     expect(r.exitCode).toBe(1);
     const parsed = JSON.parse(r.stdout.trim().split('\n').pop()!);
     expect(parsed.reason).toBe('thin_client_config_present');
+  });
+
+  // ─── Tier B: gbrain remote ping + remote doctor ───
+
+  test('gbrain remote doctor returns the host DoctorReport', async () => {
+    const r = await spawn(['remote', 'doctor', '--json'], clientHome);
+    // Exit code reflects the host brain's health. On an empty fresh brain
+    // brain_score is 0, so status is 'unhealthy' and exit is 1. That's
+    // legitimate doctor output, not a transport failure. What this test
+    // pins is the round-trip + JSON shape.
+    const report = JSON.parse(r.stdout.trim());
+    expect(report.schema_version).toBe(2);
+    expect(['healthy', 'warnings', 'unhealthy']).toContain(report.status);
+    const names = report.checks.map((c: { name: string }) => c.name);
+    expect(names).toContain('connection');
+    expect(names).toContain('schema_version');
+    expect(names).toContain('brain_score');
+    expect(names).toContain('queue_health');
+    // Host is fresh + connected, so connection check is OK.
+    const conn = report.checks.find((c: { name: string; status: string }) => c.name === 'connection');
+    expect(conn.status).toBe('ok');
+    // Schema version is at LATEST_VERSION on a fresh init.
+    const sv = report.checks.find((c: { name: string; status: string }) => c.name === 'schema_version');
+    expect(sv.status).toBe('ok');
+  });
+
+  test('gbrain remote ping triggers autopilot-cycle and returns terminal state', async () => {
+    // Test budget: 60s ping wait, 120s test timeout (overhead). Empty brain
+    // with no configured repo path will likely have autopilot-cycle fail-fast
+    // in the sync phase — that's fine. What this test pins is the wire path:
+    // submit_job → get_job poll → terminal state JSON. NOT cycle success on
+    // a no-repo fixture.
+    const r = await spawn(['remote', 'ping', '--json', '--timeout', '60s'], clientHome);
+    expect(r.stdout.length).toBeGreaterThan(0);
+    const parsed = JSON.parse(r.stdout.trim());
+    expect(parsed).toHaveProperty('job_id');
+    expect(parsed.job_id).toBeGreaterThan(0);
+    // success → completed; otherwise any terminal state OR timeout is OK.
+    if (parsed.status === 'success') {
+      expect(parsed.state).toBe('completed');
+    } else {
+      expect(['failed', 'dead', 'cancelled', 'timeout']).toContain(parsed.reason ?? parsed.state);
+    }
+  });
+
+  test('client without admin scope cannot call run_doctor', async () => {
+    // Register a separate client with read+write only (no admin) and verify
+    // that gbrain remote doctor surfaces an auth-error message. This is the
+    // codex review #7 regression guard — the verification flow MUST require
+    // admin scope.
+    const reg = await spawn([
+      'auth', 'register-client', 'thin-client-readwrite',
+      '--grant-types', 'client_credentials',
+      '--scopes', 'read write',
+    ], hostHome);
+    if (reg.exitCode !== 0) throw new Error(`register-client failed: ${reg.stderr || reg.stdout}`);
+    const parsed = parseRegisterClientOutput(reg.stdout);
+    const lowScopeId = parsed.clientId;
+    const lowScopeSecret = parsed.clientSecret;
+
+    // Spin up a separate clientHome for the lower-scope client
+    const lowScopeHome = mkdtempSync(join(tmpdir(), 'gbrain-thin-client-lowscope-'));
+    try {
+      const init = await spawn([
+        'init', '--mcp-only', '--json',
+        '--issuer-url', `http://127.0.0.1:${serverPort}`,
+        '--mcp-url', `http://127.0.0.1:${serverPort}/mcp`,
+        '--oauth-client-id', lowScopeId,
+        '--oauth-client-secret', lowScopeSecret,
+      ], lowScopeHome);
+      if (init.exitCode !== 0) {
+        throw new Error(`low-scope init exit=${init.exitCode}\nstdout:${init.stdout}\nstderr:${init.stderr}`);
+      }
+      expect(init.exitCode).toBe(0);
+
+      const r = await spawn(['remote', 'doctor', '--json'], lowScopeHome);
+      expect(r.exitCode).toBe(1);
+      const err = JSON.parse(r.stdout.trim());
+      expect(err.status).toBe('error');
+      // Either the SDK 401 path or our auth_after_refresh wrap is fine —
+      // the test pins "this fails because admin scope is missing".
+      expect(['auth', 'auth_after_refresh', 'tool_error']).toContain(err.reason);
+    } finally {
+      rmSync(lowScopeHome, { recursive: true, force: true });
+    }
   });
 });
