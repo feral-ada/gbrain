@@ -749,6 +749,11 @@ ADMIN
   # programmatically via oauthProvider.registerClientManual() for host-repo wrappers.
   gbrain integrations                   Integration recipe dashboard
   gbrain sources list|add|remove|...    Multi-source brain management (v0.18)
+                                        v0.28.2: --url <https://...> registers a federated
+                                        remote git repo; clone is auto-managed under
+                                        $GBRAIN_HOME/clones/<id>/ and re-cloned on sync if
+                                        it goes missing. Also exposed via MCP for remote
+                                        agent setup (whoami + sources_{add,list,remove,status}).
   gbrain dream [--dry-run] [--phase N]  8-phase maintenance cycle (lint→backlinks→sync→synthesize
                                         →extract→patterns→embed→orphans). v0.23 added synthesize +
                                         patterns: transcripts → reflections + cross-session themes.

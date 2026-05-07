@@ -2,6 +2,84 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.28.6] - 2026-05-06
+
+**The brain finally captures what you BELIEVE, not just what's true.**
+**Takes ship: typed, weighted, attributed claims that diff in git.**
+
+v0.28.6 adds the largest structural surface gbrain has ever shipped: a takes
+layer that turns every page into a queryable belief surface. Four kinds
+(`fact | take | bet | hunch`), explicit attribution (`world | garry | brain
+| <slug>`), 0.0–1.0 weight, since/until dates, supersede chains, and bet
+resolution. Markdown is the source of truth (a fenced table on the page);
+Postgres is the derived index. Every weight change diffs in git. Every
+superseded take stays visible with strikethrough so belief evolution is
+preserved. `gbrain takes` CLI ships list, search, add, update, supersede,
+and resolve. Plus unified model config, per-token MCP visibility for the
+takes layer, three new MCP ops, and a re-chunk fix that closes a real
+privacy hole at the index layer.
+
+### The numbers that matter
+
+Real surface area added vs the v0.24 baseline. Numbers from `git diff
+master..HEAD --stat`:
+
+| Surface | Before | After | Δ |
+|---|---|---|---|
+| Engine methods on BrainEngine | 41 | 50 | +9 |
+| MCP operations | 41 | 44 | +3 (takes_list, takes_search, think) |
+| New SQL tables | — | 2 | takes + synthesis_evidence (HNSW partial index, FK CASCADE) |
+| Schema migrations | v36 | v38 | +v37 (takes), +v38 (access_tokens.permissions JSONB) |
+| New unit/integration tests | — | 75 | 36 takes + 10 page-lock + 11 model-config + 8 MCP allow-list + 5 extract + 5 fence parity |
+| New CLI commands | — | 1 family | `gbrain takes <list\|search\|add\|update\|supersede\|resolve>` + `gbrain auth permissions` |
+| Privacy holes closed | 1 P0 | 0 | takes content stripped from page chunks before indexing (Codex P0 #3) |
+
+**What this means for you**: every page becomes a queryable belief
+surface. `gbrain takes search "vertical AI"` returns ranked claims across
+the entire brain. Add a hunch after office hours; supersede it three
+months later when the data turns. The brain has been collecting facts for
+years; v0.28.6 starts collecting your reads on those facts.
+
+### What's coming in v0.28.x as follow-ups
+
+- `gbrain think` synthesis pipeline (op surface registered now; gather +
+  RRF + cite + synthesize land in v0.28.x)
+- `gbrain takes seed <slug>` — LLM extracts claims from page prose
+- Dream `auto_think` + `drift` phases (opt-in)
+
+The architecture is fully plumbed; the LLM-touching paths land
+incrementally so the contracts are stable for SDK callers from day one.
+
+## To take advantage of v0.28.6
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain
+doctor` warns about an incomplete migration:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+   This applies migrations v37 (takes + synthesis_evidence) and v38
+   (access_tokens.permissions JSONB) and runs a one-time backfill to
+   populate the takes index from any pre-existing fenced takes tables
+   in your markdown.
+2. **Your agent reads `skills/migrations/v0.28.0.md` the next time you
+   interact with it** — that skill explains the takes layer and how to
+   invoke `gbrain takes`. The migration orchestrator handles the
+   mechanical side; your agent picks up the new conventions on its
+   own.
+3. **Verify the outcome:**
+   ```bash
+   gbrain takes --help
+   gbrain doctor
+   gbrain stats
+   ```
+4. **If any step fails or the numbers look wrong,** please file an issue
+   at https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+   - which step broke
+
 ## [0.28.5] - 2026-05-06
 
 ## **`gbrain upgrade` is finally self-healing. Wedged brains, blocked binaries, and the `bun add -g` foot-gun all fixed in one wave.**
@@ -107,6 +185,7 @@ issue with the doctor output and we will look.
    - output of `gbrain doctor`
    - output of `gbrain --version`
    - which step broke
+
 
 ## [0.28.4] - 2026-05-06
 
@@ -250,6 +329,185 @@ If you've been running an earlier copy of `restart-sweep.mjs` from the directory
 
 #### For contributors
 - Plan + reviews for this work live at `~/.claude/plans/figure-out-if-we-eager-coral.md`. Three review passes ran (CEO/HOLD, ENG/PLAN, codex outside-voice). Codex caught two silent-correctness bugs the eng review missed: idempotency key collapse (C1) and import-time env snapshot (C2). Both folded in before merge. The plan documents the recipe-vs-plugin-handler decision (held recipe path for v1; plugin handler is the v2 shape per `docs/guides/plugin-handlers.md`).
+
+## [0.28.2] - 2026-05-06
+
+**Register a remote git URL as a brain source over HTTP MCP.**
+**Least-privilege OAuth: scoped tokens for sources management without admin keys.**
+
+If your brain runs on a server (Tailscale-reachable, Cloudflare-tunneled,
+on-prem), you can now point any MCP client at the brain and add a federated
+source by URL — no SSH into the brain host. `gbrain sources add --url
+https://github.com/your-org/notes` clones, registers, and syncs in one
+call. The clone lives at a predictable path; if it gets autopurged the
+next sync re-clones it. The whole flow is also exposed as MCP ops, so
+gstack and similar agents can wire up the source automatically.
+
+The OAuth scope hierarchy got two new tiers (`sources_admin`,
+`users_admin`) so you can mint tokens that manage sources without granting
+admin to your pages. Tokens stay least-privilege; refresh and discovery
+work end to end.
+
+### What you can do that you couldn't before
+
+- **`gbrain sources add --url <https-url>`** — clones a remote git repo
+  into `$GBRAIN_HOME/clones/<id>/`, registers it as a federated source,
+  and stores the URL so future syncs auto-recover from a missing clone.
+- **`whoami` MCP op** — any authenticated client can introspect itself:
+  `{transport, client_id, scopes, expires_at}`. Lets agents detect what
+  capabilities they have without trial-and-error against every other op.
+- **`sources_add`, `sources_list`, `sources_remove`, `sources_status`
+  MCP ops** — full source lifecycle over HTTP MCP. `sources_status`
+  returns a `clone_state` field (`healthy | missing | no-git | url-drift
+  | corrupted`) so a remote agent can diagnose a busted clone without
+  SSH.
+- **Scoped tokens** — `gbrain auth register-client X --scopes "read
+  sources_admin"` mints a token that can manage federated sources without
+  page-write or admin access. The OAuth allowlist rejects bogus scope
+  strings at registration time.
+- **Auto-recovery on sync** — if your `$GBRAIN_HOME/clones/<id>/`
+  directory gets deleted (operator cleanup, disk move, host migration),
+  the next `gbrain sync --source <id>` re-clones from the recorded URL
+  and continues.
+- **`gbrain doctor` orphan-clones check** — surfaces stale temp dirs in
+  `$GBRAIN_HOME/clones/.tmp/` so a SIGKILL'd `add --url` doesn't quietly
+  fill your disk over months.
+
+### Numbers that matter
+
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| MCP ops registered | 44 | 49 | +5 (whoami + sources_*) |
+| OAuth scopes advertised | 3 | 5 | +2 (sources_admin, users_admin) |
+| `/setup-gbrain` Path 4 manual SSH steps | 4 | 0 | -4 |
+| Lines of new test coverage | 0 | ~1500 | (8 new test files) |
+
+The 4-to-0 SSH-step number is the gstack `/setup-gbrain` flow: previously
+the operator had to ssh into the brain host, run `gbrain sources add
+--path <local clone>`, and re-register. Post-v0.28.2 that's a single
+`sources_add` MCP call from any agent with `sources_admin` scope.
+
+### What this means for you
+
+If you run a personal brain on your laptop, this is invisible — `gbrain
+upgrade` and you keep working. If you run a brain on a server that other
+agents talk to over HTTP MCP (Tailscale node, Cloudflare tunnel, lab
+host), this is the v0.28 release that lets you wire those agents up
+without ever opening an SSH session. Mint a `sources_admin` token, hand
+it to the agent, the agent does the rest.
+
+### To take advantage of v0.28.2
+
+`gbrain upgrade` should do this automatically. If you're running a
+gbrain HTTP server, also rebuild the admin SPA so the Register modal
+shows the new scope checkboxes:
+
+```bash
+gbrain upgrade
+cd admin && bun install && bun run build
+git add admin/dist/ && git commit -m "chore: rebuild admin SPA"
+```
+
+Then mint a scoped token and verify `/.well-known/oauth-authorization-server`
+advertises all 5 scopes:
+
+```bash
+gbrain auth register-client gstack-test \
+  --grant-types client_credentials \
+  --scopes "read sources_admin"
+curl http://your-brain-host/.well-known/oauth-authorization-server | jq .scopes_supported
+# expect: ["admin","read","sources_admin","users_admin","write"]
+```
+
+If anything looks wrong, please file an issue:
+https://github.com/garrytan/gbrain/issues with:
+- output of `gbrain doctor`
+- which step broke
+
+### Itemized changes
+
+**New: `gbrain sources add --url`** — HTTPS-only remote source registration
+with SSRF defenses and atomic clone (temp-dir + rename + rollback). Internal
+URL classification reuses `isInternalUrl` from `src/core/url-safety.ts`
+(extracted from `integrations.ts` so SSRF gates stay DRY across the
+codebase). `git clone` runs with redirects disabled, submodule recursion
+disabled, and no external protocol helpers — closes the bypass surfaces
+that survive a naive private-IP filter.
+
+**New: `whoami` + `sources_*` MCP ops** — five new ops auto-flow through
+the existing tool-defs surface. `whoami` returns a `transport` field
+(`oauth | legacy | local`) and throws `unknown_transport` when the
+context is ambiguous (preserves the v0.26.9 fail-closed posture).
+`sources_*` ops use `sources_admin` scope so a token with that scope
+can register and remove sources but cannot write pages.
+
+**New: scope hierarchy + allowlist (`src/core/scope.ts`)** — `hasScope`
+helper replaces exact-string-match at four enforcement sites. `admin`
+implies all; `write` implies `read`; `sources_admin` and `users_admin`
+are siblings. `ALLOWED_SCOPES` is validated at registration time
+(CLI + DCR /register + manual). Pre-allowlist clients keep working.
+
+**New: doctor `orphan_clones` check + `purge` phase substep** — surfaces
+stale `.tmp/` clone dirs older than 24h; the autopilot purge phase nukes
+them on the same TTL as page soft-deletes (72h).
+
+**Sync auto-recovery** — `performSync` now classifies the on-disk clone
+state via `validateRepoState`. If the clone is missing/no-git/not-a-dir,
+it re-clones from `config.remote_url`. If corrupted or url-drift, it
+refuses with structured hints rather than syncing wrong state.
+
+**Symlink-safe clone cleanup** — `sources_remove` uses realpath+lstat
+confinement (matching `validateUploadPath`) before `rm -rf`. String
+prefix match would let a malicious symlink resolve out of the
+$GBRAIN_HOME/clones/ confine.
+
+**OAuth metadata** — `/.well-known/oauth-authorization-server` advertises
+all 5 scopes so MCP clients (Claude Desktop, ChatGPT, Perplexity) discover
+the new tiers via standard OAuth discovery.
+
+**Admin SPA** — Register Client modal sources its scope checkbox set from
+`admin/src/lib/scope-constants.ts`, a hand-maintained mirror of
+`src/core/scope.ts`. `scripts/check-admin-scope-drift.sh` fails the build
+if the two diverge — wired into `bun run verify`.
+
+### Codex hardening pass (pre-ship adversarial review)
+
+The pre-ship adversarial review caught five issues that landed alongside the
+core feature:
+
+- `sources_admin` tokens over HTTP MCP can no longer override `path` or
+  `clone_dir`. Those flags were a privilege escalation primitive: a remote
+  caller with the new scope could plant repo content at any host path,
+  and the auto-recovery branch's `rm -rf` on degraded state turned that
+  into arbitrary delete. Local CLI keeps the override (operator trust);
+  remote callers get the safe default `$GBRAIN_HOME/clones/<id>/` and a
+  warn log when they tried.
+- Steady-state `git pull --ff-only` now routes through the same SSRF-defensive
+  flag set as the initial clone. The legacy helper at `src/commands/sync.ts:192`
+  was spawning git without `-c http.followRedirects=false -c protocol.{file,ext}.allow=never --no-recurse-submodules`,
+  so every recurring sync was reopening the redirect/submodule/protocol
+  bypass that `cloneRepo` closed.
+- `sources_list` honors `include_archived: false` (the default). Archived
+  sources' ids, local_paths, and remote_urls were leaking to read-scoped
+  callers regardless of the flag.
+- `parseRemoteUrl` blocks IPv6 ULA `fc00::/7` and link-local `fe80::/10`.
+  Previously only `::1` / `::` and IPv4-mapped IPv6 were rejected.
+- DNS rebinding defense filed as a v0.28.x follow-up TODO. The current
+  gate is lexical only; a deliberate attacker with DNS control can still
+  resolve a public hostname to an internal IP. Closing this needs async
+  DNS resolution + revalidation.
+
+### For contributors
+
+- `src/core/url-safety.ts` extracted from `integrations.ts` for cross-layer
+  reuse. `src/commands/integrations.ts` re-exports the same names so
+  existing test imports work unchanged.
+- `src/core/sources-ops.ts` houses the pure-function source-management
+  surface that both the CLI and the new MCP ops call into. Atomicity
+  contract documented in the file header.
+- `bun run check:admin-scope-drift` — new gate; fails the build if
+  `admin/src/lib/scope-constants.ts` falls behind `src/core/scope.ts`.
+
 
 ## [0.28.1] - 2026-05-06
 
@@ -1165,6 +1423,32 @@ React admin dashboard baked into the binary. Seven screens designed through Stev
    ```bash
    gbrain apply-migrations --yes
    ```
+2. **Your agent reads `skills/migrations/v0.28.0.md` the next time you
+   interact with it.** The migration backfills takes from any pre-existing
+   fenced markdown tables; queues a re-chunk TODO so the chunker-strip
+   rule (Codex P0 fix — keeps takes content out of page chunks where the
+   per-token allow-list cannot reach) catches up on legacy pages.
+3. **Verify the outcome:**
+   ```bash
+   gbrain doctor
+   gbrain stats
+   gbrain takes --help
+   ```
+4. **Migrate per-phase model keys** (optional, mechanical, deprecation
+   warning until v0.30):
+   ```bash
+   gbrain config set models.default sonnet
+   ```
+5. **Configure MCP token visibility** (security-relevant for tokens
+   bound to public/agent integrations):
+   ```bash
+   gbrain auth permissions <token-name> set-takes-holders world,garry,brain
+   ```
+   Default for tokens with no permissions row: `["world"]`. Hunches stay
+   private to local CLI callers unless you explicitly grant agent visibility.
+
+6. **If any step fails or the numbers look wrong,** please file an issue:
+   https://github.com/garrytan/gbrain/issues with:
 2. **Verify OAuth tables exist:**
    ```bash
    gbrain doctor
@@ -1185,6 +1469,69 @@ React admin dashboard baked into the binary. Seven screens designed through Stev
 
 ### Itemized changes
 
+#### Schema (migrations v37 + v38)
+
+- **takes table** — `(page_id, row_num)` natural unique key + `id BIGSERIAL`
+  PK; full claim metadata; resolution metadata (`resolved_at`,
+  `resolved_outcome`, `resolved_value`, `resolved_unit`, `resolved_source`,
+  `resolved_by`); HNSW partial index on `embedding` for active rows.
+- **synthesis_evidence table** — composite FK with `ON DELETE CASCADE`.
+- **access_tokens.permissions JSONB** — default `{"takes_holders":["world"]}`.
+  Backfill UPDATE handles pre-existing rows so old tokens default-deny.
+
+#### Engine + types
+
+- BrainEngine gains 9 new methods.
+- `Take`, `TakeBatchInput`, `TakeHit`, `StaleTakeRow`, `TakeKind`,
+  `TakesListOpts`, `TakeResolution`, `SynthesisEvidenceInput` types.
+- `OperationContext.takesHoldersAllowList` threaded through dispatch.
+
+#### Markdown surface
+
+- `src/core/takes-fence.ts` — pure parser/renderer/upserter for the
+  fenced table. Append-only semantics; row_num monotonic forever.
+- `src/core/page-lock.ts` — PID-liveness file lock per page.
+- `src/core/cycle/extract-takes.ts` — dual-path (fs + db) phase.
+- `src/core/chunkers/recursive.ts` — calls `stripTakesFence()` BEFORE
+  chunking (Codex P0 #3 privacy fix).
+
+#### Unified model config
+
+- `src/core/model-config.ts` — `resolveModel()` 6-tier resolver replaces
+  hardcoded model strings and per-phase config keys.
+- Aliases: `opus`, `sonnet`, `haiku`, `gemini`, `gpt`. Cycle-safe.
+- Migrated call sites: `synthesize.ts` (model + verdictModel), `patterns.ts`
+  (model). Deprecated keys still honored with stderr warning until v0.30.
+
+#### MCP + auth
+
+- New ops `takes_list`, `takes_search`, `think` (think op-surface only;
+  pipeline in v0.28.x).
+- HTTP transport reads `access_tokens.permissions.takes_holders` and
+  threads through dispatch → engine SQL filter.
+- Stdio defaults to `["world"]`.
+- `gbrain auth create --takes-holders` flag + `auth permissions <name>
+  set-takes-holders` subcommand.
+
+#### CLI
+
+- `gbrain takes <slug>` / `search` / `add` / `update` / `supersede` /
+  `resolve` — full lifecycle.
+
+#### Tests added
+
+75 new cases. All pass. Coverage: `test/takes-engine.test.ts` (16),
+`test/takes-fence.test.ts` (15), `test/extract-takes.test.ts` (5),
+`test/page-lock.test.ts` (10), `test/model-config.test.ts` (11),
+`test/takes-mcp-allowlist.test.ts` (8).
+
+#### Risks accepted
+
+- **Think pipeline ships incrementally**: op surface registered now,
+  pipeline lands in v0.28.x. SDK callers detect the surface and degrade
+  gracefully.
+- **Auto-think + drift phases deferred**: opt-in dream-cycle phases for
+  autonomous belief evolution. Land in v0.28.x; no schema migration needed.
 **Security hardening (post-/cso pass):**
 - Auth code exchange + refresh token rotation now use atomic `DELETE...RETURNING` instead of SELECT-then-DELETE. The earlier non-atomic pattern let two concurrent token requests with the same auth code both succeed, issuing two valid token pairs from one code (RFC 6749 §10.5 violation). Same shape applied to refresh tokens (RFC 6749 §10.4 detection of stolen tokens depends on second-use failure). New regression tests fire 10 concurrent requests with the same code/refresh and assert exactly one succeeds.
 - `pgArray()` now escapes commas, braces, quotes, and backslashes inside array elements. The earlier no-escape join could be exploited (with `--enable-dcr` on) to smuggle a second redirect_uri into a registered client's array, enabling auth code redirection to an attacker-controlled domain.

@@ -74,6 +74,90 @@
 **Pros:** Liveness probe stays under 100ms even on saturated pools. Operators get a separate `/stats` for the count breakdown when they actually want it.
 **Cons:** Behavior change for orchestrator setups that scrape /health as both liveness AND count source.
 **Context:** PR #637 (v0.28.1) adversarial review. Pair with the AbortController follow-up above.
+## Remote-source MCP follow-ups (v0.28.2)
+
+### Token rotation: `gbrain auth rotate <name>` + `rotate_token` MCP op
+**Priority:** P2
+
+**What:** Atomic rotate for legacy + OAuth tokens. Issue a new token in the same TX as the revocation of the old, no overlap window. Refresh-token rotation already exists for OAuth; this is the unified user-facing surface (CLI + MCP).
+
+**Why:** Today rotation is `revoke + create`, with a window where neither token works. For long-lived bearer keys handed to agents, that's a reload outage every time the key gets rotated.
+
+**Pros:** Single command does the right thing. Atomic cutover. Operators stop scripting around the gap.
+**Cons:** Needs careful testing of the legacy `access_tokens` UPDATE path (returns single-use new token before the row mutates) plus an MCP op that grants a new token bound to the original client_id without requiring a new authorize round trip.
+**Context:** Item 4 from the gstack /setup-gbrain v1.28.1.0 enhancement request. v0.28.x candidate.
+**Depends on:** Nothing.
+
+### Migration introspection in `get_health`
+**Priority:** P3
+
+**What:** Extend `BrainEngine.getHealth()` return shape with `migrations: { pending: [...], wedged: [...] }`. `gbrain doctor` already shows this; expose it via the MCP op so remote agents can detect partial-migration state without invoking `doctor` separately.
+
+**Why:** Closes a remote-diagnostic gap. gstack /setup-gbrain Path 4 hit a wedged-migration brain mid-session; the only readback was SSH + `gbrain doctor`. With this, the same diagnostic flows through MCP.
+
+**Pros:** Pure additive change to the `get_health` op shape. No new op surface. Consumers ignore the new field if they don't care.
+**Cons:** Wedged detection logic lives in `gbrain doctor`'s code today; need to extract or duplicate. Care needed not to leak migration internals to non-admin scopes (current op is admin-only — fine).
+**Context:** Item 5 from the gstack /setup-gbrain v1.28.1.0 enhancement request.
+**Depends on:** Nothing.
+
+### Accept-header friendliness on `/mcp`
+**Priority:** P3
+
+**What:** MCP SDK rejects requests missing `text/event-stream` in the Accept header with a generic 406 Not Acceptable. Pre-check the header at the express middleware layer and return a 400 with a descriptive hint pointing at the spec.
+
+**Why:** Other MCP clients (curl scripts, custom integrations) hit the SDK's 406 and get no diagnostic. gstack's verify-helper sets both headers correctly so the headline path works.
+
+**Pros:** Operator UX improvement. Faster debugging when clients fail discovery.
+**Cons:** Tight coupling to the SDK behavior — if it later loosens, the pre-check becomes redundant.
+**Context:** Item 6 from the gstack /setup-gbrain v1.28.1.0 enhancement request.
+**Depends on:** Nothing.
+
+### `gbrain sources rebase-clone <id>`
+**Priority:** P3
+
+**What:** Recover from `url-drift` (config.remote_url updated but the on-disk clone still points at the old origin). Currently `sync` refuses with a structured error pointing at this command — but the command itself doesn't exist yet. Implement: prompt for confirmation (rm-rf the clone is destructive), then re-clone via the same temp-dir + rename atomicity contract as `sources add --url`.
+
+**Why:** Closes the loop on the URL-drift code path the v0.28.2 sync added. Without it, operators have to `sources remove --confirm-destructive` + `sources add --url` (loses page count, history).
+
+**Pros:** Cleaner UX for URL changes. Preserves the source row + history.
+**Cons:** Destructive on-disk; needs `--confirm-destructive` gate. Edge case: what if sync is mid-run when rebase fires? The existing sync-lock guards this, but worth pinning in tests.
+**Context:** v0.28.2 plan filed this explicitly as a follow-up.
+**Depends on:** Nothing.
+
+### `--filter=blob:none` partial-clone option for federated sources
+**Priority:** P3
+
+**What:** v0.28.2 defaults `gbrain sources add --url` to `--depth=1` (no history). For users who want commit-aware features later (page-state-at-commit-X, blame, who-edited-what), expose `--filter=blob:none` as an opt-in: keeps full graph metadata, lazy-fetches blobs.
+
+**Why:** `--depth=1` is a one-way door — once cloned, you can't reconstruct history without re-cloning the whole repo. Partial clones preserve history while staying small.
+
+**Pros:** Forward-compat for commit-aware brain features. Negligible cost on first clone for typical brain repos. Better than the alternative (full clones for everyone).
+**Cons:** First-clone latency is higher on long-history repos. Adds one more flag to the `add` surface.
+**Context:** Eng review A5 — the boring choice for v0.28.2 was `--depth=1`. This is the unboring follow-up.
+**Depends on:** Nothing.
+
+### DNS rebinding defense for `parseRemoteUrl`
+**Priority:** P3
+
+**What:** `isInternalUrl` (`src/core/url-safety.ts`) does lexical/string-based classification only — no DNS resolution. An attacker who controls a public hostname's A/AAAA records can resolve to internal IPs (`127.0.0.1`, `169.254.169.254`, RFC 1918) and bypass the SSRF gate. The gate catches direct IP literals + metadata hostnames; it doesn't catch `https://attacker-controlled.example/repo.git` where DNS points internal.
+
+**Why:** Defense in depth. The current gate is sufficient for naive abuse (typing `192.168.1.1` directly), but a deliberate attacker with DNS control can bypass it. Adding async DNS resolution + revalidation closes the hole.
+
+**Pros:** Closes the cleanest remaining SSRF bypass. Mirrors the redirect-revalidation pattern at `integrations.ts:289`. Pinned by a future test using a mock resolver.
+**Cons:** Async DNS makes `parseRemoteUrl` `async`. Every caller (CLI, MCP op, test) needs to update. ~50-line change.
+**Context:** Codex finding from v0.28.2 ship adversarial review. The IPv6 ULA + link-local portion of the same finding shipped in v0.28.2; DNS rebinding deferred.
+**Depends on:** Nothing.
+
+### `sources.chunker_version` PGLite-schema parity
+**Priority:** P3
+
+**What:** `src/schema.sql:33` declares `sources.chunker_version` and `src/commands/sync.ts:253` reads/writes it, but `src/core/pglite-schema.ts:28` omits the column. PGLite users hit a schema-mismatch error on the sync write path.
+
+**Why:** Pre-existing bug surfaced during the v0.28.2 codex review. Not introduced by remote-source work, but adjacent to source-sync code. Worth fixing as a small parity PR before more source-local state lands.
+
+**Pros:** Closes a quiet schema drift between the two engine implementations. ~10 lines.
+**Cons:** Needs a migration entry to add the column to existing PGLite brains. Migration version bump.
+**Context:** Codex D5 from v0.28.2 plan review.
 **Depends on:** Nothing.
 
 ## OAuth/MCP hardening (v0.26.7 follow-up)
