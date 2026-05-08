@@ -14,7 +14,7 @@ import { deriveResolutionTuple, finalizeScorecard } from './takes-resolution.ts'
 import { runMigrations } from './migrate.ts';
 import { SCHEMA_SQL } from './schema-embedded.ts';
 import { verifySchema } from './schema-verify.ts';
-import { applyChunkEmbeddingIndexPolicy } from './vector-index.ts';
+import { applyChunkEmbeddingIndexPolicy, dropZombieIndexes } from './vector-index.ts';
 import type {
   Page, PageInput, PageFilters, PageType,
   Chunk, ChunkInput, StaleChunkRow,
@@ -246,6 +246,16 @@ export class PostgresEngine implements BrainEngine {
       if (verify.healed.length > 0) {
         console.log(`  Schema verify: self-healed ${verify.healed.length} missing column(s)`);
       }
+
+      // v0.30.1 (Fix 5): sweep zombie HNSW indexes (indisvalid=false) from
+      // crashed CREATE INDEX CONCURRENTLY calls. Best-effort; errors logged
+      // to stderr but never block engine.connect.
+      try {
+        const result = await dropZombieIndexes(this);
+        if (result.dropped.length > 0) {
+          console.log(`  HNSW sweep: dropped ${result.dropped.length} zombie index(es)`);
+        }
+      } catch { /* best-effort */ }
     } finally {
       await conn`SELECT pg_advisory_unlock(42)`;
       logConnectionEvent({
