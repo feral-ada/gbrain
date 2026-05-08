@@ -779,14 +779,16 @@ async function collectChildPutPageSlugs(
 ): Promise<string[]> {
   if (childIds.length === 0) return [];
   // Raw fetch — NO SELECT DISTINCT. Preserves per-child slug duplicates so
-  // the orchestrator sees what each child wrote.
+  // the orchestrator sees what each child wrote. COALESCE handles both
+  // properly-stored jsonb objects (input->>'slug') and double-encoded jsonb
+  // strings from pre-fix data ((input #>> '{}')::jsonb->>'slug').
   const rows = await engine.executeRaw<{ job_id: number; slug: string }>(
-    `SELECT job_id, input->>'slug' AS slug
+    `SELECT job_id,
+            COALESCE(input->>'slug', (input #>> '{}')::jsonb->>'slug') AS slug
        FROM subagent_tool_executions
       WHERE job_id = ANY($1::int[])
         AND tool_name = 'brain_put_page'
-        AND status = 'complete'
-        AND input ? 'slug'`,
+        AND status = 'complete'`,
     [childIds],
   );
   const rewritten = new Set<string>();
