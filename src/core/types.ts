@@ -640,6 +640,35 @@ export interface BrainHealth {
   timeline_coverage_score: number;   // 0-15
   no_orphans_score: number;          // 0-15
   no_dead_links_score: number;       // 0-10
+  /**
+   * v0.30.1 (Cherry D7 + Codex C3): explicit migrations diagnostic surface
+   * exposed to MCP get_health callers so remote agents can detect a wedged
+   * brain WITHOUT shelling SSH + gbrain doctor. Two ledgers (schema +
+   * orchestrator) per Codex T5 namespacing.
+   *
+   * `schema_version` ("1") on the parent BrainHealth pins the additive
+   * contract — clients should default-handle missing fields and never
+   * assume removed ones.
+   */
+  schema_version?: '1';
+  migrations?: {
+    schema: {
+      /** Current numeric config.version. */
+      version: number;
+      /** Latest available migration. */
+      latest_version: number;
+      /**
+       * Optional drift evidence — names of columns/tables a verify hook
+       * surfaced as missing on opt-in migrations. Empty array means no
+       * drift detected (or no verify hook ran).
+       */
+      verify_drift?: string[];
+    };
+    orchestrator: {
+      pending: Array<{ version: string; name: string; status: 'pending' | 'partial' }>;
+      wedged: Array<{ version: string; name: string; consecutive_partials: number }>;
+    };
+  };
 }
 
 // Ingest log
