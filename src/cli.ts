@@ -584,6 +584,13 @@ const THIN_CLIENT_REFUSED_COMMANDS = new Set([
   'repair-jsonb', 'orphans', 'integrity', 'serve',
   // v0.31.1 (CDX-2 op coverage matrix): more local-only commands
   'dream', 'transcripts', 'storage',
+  // v0.31.1 CDX-2 audit: takes/sources have multiple subcommands; some
+  // (takes_list/takes_search, sources_list/sources_status) have MCP
+  // equivalents and others are file-system bound (takes mutate commands
+  // edit local .md files). v0.31.1 refuses both at the top level with a
+  // hint pointing at the routable MCP tools; per-subcommand splits are
+  // a v0.31.x follow-up TODO.
+  'takes', 'sources',
 ]);
 
 /**
@@ -609,6 +616,8 @@ const THIN_CLIENT_REFUSE_HINTS: Record<string, string> = {
   orphans: "orphans needs the host's brain. Run on the host or use the `find_orphans` MCP tool from your agent.",
   transcripts: 'transcripts is server-private (raw chat exports stay on the host). Read transcripts on the host machine.',
   storage: 'storage operates on the local repo on disk. Run on the host.',
+  takes: 'takes mutate subcommands edit local .md files; routing the read subcommands lands in v0.31.x. For now: use `takes_list` and `takes_search` MCP tools from your agent, or run on the host.',
+  sources: 'sources commands manage local DB + config rows. Per-subcommand thin-client routing lands in v0.31.x. For now: use `sources_list` / `sources_status` MCP tools, or run on the host.',
 };
 
 /**
