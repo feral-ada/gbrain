@@ -36,6 +36,7 @@ const DATABASE_URL = process.env.DATABASE_URL ?? '';
 
 let tmp: string;
 let origHome: string | undefined;
+let origGbrainHome: string | undefined;
 let origPath: string | undefined;
 let fakeBinDir: string;
 const CLI_PATH = join(import.meta.dir, '..', '..', 'src', 'cli.ts');
@@ -61,7 +62,13 @@ if (!SKIP) {
 
 function freshTempHome(label: string) {
   const dir = mkdtempSync(join(tmpdir(), `gbrain-e2e-migration-${label}-`));
+  // v0.30.3: preferences + completed.jsonl now route through gbrainPath()
+  // which honors GBRAIN_HOME (was: $HOME-only). Set both so the same test
+  // body works against pre-v0.30.3 and current source — and so other env
+  // readers that still use $HOME (e.g., shell-spawned subprocesses that
+  // cd into ~) land in the same hermetic dir.
   process.env.HOME = dir;
+  process.env.GBRAIN_HOME = dir;
   // Seed config so Phase A's `gbrain init --migrate-only` has a target.
   mkdirSync(join(dir, '.gbrain'), { recursive: true });
   writeFileSync(
@@ -78,12 +85,15 @@ beforeAll(() => {
     return;
   }
   origHome = process.env.HOME;
+  origGbrainHome = process.env.GBRAIN_HOME;
 });
 
 afterAll(() => {
   if (SKIP) return;
   if (origHome === undefined) delete process.env.HOME;
   else process.env.HOME = origHome;
+  if (origGbrainHome === undefined) delete process.env.GBRAIN_HOME;
+  else process.env.GBRAIN_HOME = origGbrainHome;
   if (origPath === undefined) delete process.env.PATH;
   else process.env.PATH = origPath;
   try { if (fakeBinDir) rmSync(fakeBinDir, { recursive: true, force: true }); } catch { /* best-effort */ }

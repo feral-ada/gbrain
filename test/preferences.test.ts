@@ -14,17 +14,26 @@ import {
 } from '../src/core/preferences.ts';
 
 let origHome: string | undefined;
+let origGbrainHome: string | undefined;
 let tmp: string;
 
 beforeEach(() => {
   origHome = process.env.HOME;
+  origGbrainHome = process.env.GBRAIN_HOME;
   tmp = mkdtempSync(join(tmpdir(), 'gbrain-prefs-test-'));
+  // v0.30.3: preferences + completed.jsonl now route through gbrainPath()
+  // which honors GBRAIN_HOME. Set both so the test body works against any
+  // future homedir() refactor and so subprocess shells (if any) also land
+  // in the same hermetic dir.
   process.env.HOME = tmp;
+  process.env.GBRAIN_HOME = tmp;
 });
 
 afterEach(() => {
   if (origHome === undefined) delete process.env.HOME;
   else process.env.HOME = origHome;
+  if (origGbrainHome === undefined) delete process.env.GBRAIN_HOME;
+  else process.env.GBRAIN_HOME = origGbrainHome;
   try { rmSync(tmp, { recursive: true, force: true }); } catch { /* best-effort */ }
 });
 

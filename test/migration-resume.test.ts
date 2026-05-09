@@ -18,15 +18,22 @@ import { tmpdir } from 'os';
 
 let tmpHome: string;
 const originalHome = process.env.HOME;
+const originalGbrainHome = process.env.GBRAIN_HOME;
 
 beforeEach(() => {
   tmpHome = mkdtempSync(join(tmpdir(), 'gbrain-migration-resume-'));
+  // v0.30.3: appendCompletedMigration / loadCompletedMigrations route
+  // through gbrainPath() which honors GBRAIN_HOME. Set both so the test
+  // body works whether preferences read $HOME or GBRAIN_HOME.
   process.env.HOME = tmpHome;
+  process.env.GBRAIN_HOME = tmpHome;
 });
 
 afterEach(() => {
   if (originalHome) process.env.HOME = originalHome;
   else delete process.env.HOME;
+  if (originalGbrainHome) process.env.GBRAIN_HOME = originalGbrainHome;
+  else delete process.env.GBRAIN_HOME;
   try { rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
