@@ -17,6 +17,12 @@ import { collectRemoteDoctorReport } from '../src/core/doctor-remote.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
 import { withEnv } from './helpers/with-env.ts';
 
+// v0.31.1: the new oauth_client_scopes_probe check uses the MCP SDK Client
+// against /mcp, which the test fixture only mocks at JSON-RPC initialize
+// level (no full tools/call). Skip the probe in this suite — its behavior
+// is covered separately in test/oauth-scope-probe.test.ts (when added).
+process.env.GBRAIN_DOCTOR_SKIP_SCOPE_PROBE = '1';
+
 let server: Server;
 let port: number;
 
