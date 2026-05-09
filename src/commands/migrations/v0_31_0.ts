@@ -8,7 +8,7 @@
  * the audit trail (never deleted).
  *
  * Phases (idempotent, additive):
- *   A. Schema     — verify migration v40 is applied (the schema runner
+ *   A. Schema     — verify migration v45 is applied (the schema runner
  *                   in src/core/migrate.ts does the actual DDL during
  *                   `gbrain upgrade`/initSchema). Asserts post-condition.
  *   B. Record     — runner-owned ledger write (handled by apply-migrations.ts).
@@ -40,11 +40,11 @@ async function phaseASchema(
   try {
     const versionStr = await engine.getConfig('version');
     const v = parseInt(versionStr || '0', 10);
-    if (v < 40) {
+    if (v < 45) {
       return {
         name: 'schema',
         status: 'failed',
-        detail: `expected schema version >= 40 (facts hot memory); got ${v}. Run \`gbrain apply-migrations --yes\` to apply.`,
+        detail: `expected schema version >= 45 (facts hot memory); got ${v}. Run \`gbrain apply-migrations --yes\` to apply.`,
       };
     }
     // Post-condition: facts table exists.

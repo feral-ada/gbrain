@@ -1,5 +1,5 @@
 /**
- * v0.31 Phase 6 — migration v40 embedding dim resolution.
+ * v0.31 Phase 6 — migration v45 embedding dim resolution.
  *
  * Pins:
  *   - Migration uses HALFVEC on PGLite (recent pgvector bundled)
@@ -24,7 +24,7 @@ afterAll(async () => {
   await engine.disconnect();
 });
 
-describe('migration v40 facts column shape', () => {
+describe('migration v45 facts column shape', () => {
   test('embedding column is HALFVEC (or VECTOR fallback) — not a different type', async () => {
     const rows = await engine.executeRaw<{ udt_name: string }>(
       `SELECT udt_name FROM information_schema.columns

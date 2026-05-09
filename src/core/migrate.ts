@@ -32,6 +32,80 @@ interface Migration {
    */
   transaction?: boolean;
   handler?: (engine: BrainEngine) => Promise<void>;
+  /**
+   * v0.30.1 (D6): when undefined, treated as `true` for all existing
+   * migrations (every migration in the registry uses CREATE ... IF NOT
+   * EXISTS / ALTER ... IF NOT EXISTS / INSERT ... ON CONFLICT, so re-running
+   * is safe). Explicit `idempotent: false` blocks the verify-hook
+   * self-healing path from re-running a destructive migration; the runner
+   * surfaces `MigrationDriftError` and requires `--skip-verify` to force.
+   *
+   * NEW migrations should declare this explicitly; the CONTRIBUTING
+   * migration template lists it as required for clarity.
+   */
+  idempotent?: boolean;
+  /**
+   * v0.30.1 (D6): post-condition probe. Runs after the migration claims
+   * to have applied. Returns false if the actual schema state doesn't
+   * match what the migration declared (e.g. column/table/index missing
+   * after a partially-committed run on a wedged Supabase pooler).
+   *
+   * Verify-hook coverage is OPT-IN per migration. Per X3 / codex C6 the
+   * v0.30.1 surface ships verify hooks only on a small set of migrations;
+   * older migrations rely on `gbrain upgrade --force-schema` for recovery.
+   */
+  verify?: (engine: BrainEngine) => Promise<boolean>;
+}
+
+/**
+ * Resolve idempotent classification with the v0.30.1 default. Used by the
+ * migration runner's verify path and by the twice-run safety test
+ * (test/migrate-idempotent-classify.test.ts).
+ */
+export function isMigrationIdempotent(m: Migration): boolean {
+  // Default true: existing migrations were authored as idempotent (every
+  // CREATE/ALTER uses IF NOT EXISTS guards). Explicit false opts out.
+  return m.idempotent !== false;
+}
+
+/**
+ * Migration drift error — verify hook failed and migration is non-idempotent.
+ * Caller surfaces the column/table names that diverged and requires
+ * `--skip-verify` to force re-run.
+ */
+export class MigrationDriftError extends Error {
+  constructor(
+    public readonly version: number,
+    public readonly migrationName: string,
+    public readonly hint: string,
+  ) {
+    super(`Migration v${version} (${migrationName}) verify failed: ${hint}`);
+    this.name = 'MigrationDriftError';
+  }
+}
+
+/**
+ * Retry-exhausted envelope (v0.30.1 / Finding F2). Surface the most recent
+ * idle blockers we observed so the user has a paste-ready
+ * pg_terminate_backend(<pid>) command.
+ */
+export class MigrationRetryExhausted extends Error {
+  constructor(
+    public readonly version: number,
+    public readonly migrationName: string,
+    public readonly attempts: number,
+    public readonly lastBlockers: IdleBlocker[],
+    public readonly lastError: Error,
+  ) {
+    const lastB = lastBlockers[0];
+    const hint = lastB
+      ? `PID ${lastB.pid} idle since ${lastB.query_start} likely holds the lock; run: psql ... -c "SELECT pg_terminate_backend(${lastB.pid})"`
+      : 'No idle-in-transaction blockers detected; check pg_locks for active waiters and ~/.gbrain/audit/connection-events-*.jsonl';
+    super(
+      `Migration v${version} (${migrationName}) failed after ${attempts} attempts. ${hint}. Original: ${lastError.message}`
+    );
+    this.name = 'MigrationRetryExhausted';
+  }
 }
 
 // Migrations are embedded here, not loaded from files.
@@ -1819,6 +1893,300 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 40,
+    name: 'pages_emotional_weight',
+    // v0.29 — Salience + Anomaly Detection.
+    //
+    // Adds the `emotional_weight` column to pages. Populated by the new
+    // `recompute_emotional_weight` cycle phase from tags + takes (deterministic;
+    // no LLM). Default 0.0 so freshly imported pages don't pollute salience
+    // ranking before the cycle has run; users run `gbrain dream --phase
+    // recompute_emotional_weight` once after upgrading to backfill.
+    //
+    // No index: the salience query orders by a computed score (emotional_weight,
+    // take_count, recency-decay), not by raw emotional_weight. Add an index
+    // later only if a query orders by the raw column directly.
+    //
+    // Postgres ADD COLUMN with a constant DEFAULT is metadata-only on PG 11+
+    // and PGLite (PG 17.5 via WASM) — instant on tables of any size.
+    sql: `
+      ALTER TABLE pages
+        ADD COLUMN IF NOT EXISTS emotional_weight REAL NOT NULL DEFAULT 0.0;
+    `,
+  },
+  {
+    version: 41,
+    name: 'pages_recency_columns',
+    sql: '',
+    // v0.29.1 — Salience-and-Recency, additive opt-in.
+    //
+    // Four new pages columns (all nullable, additive only, no behavior change
+    // in the default search path; only consulted when a caller opts into
+    // `salience='on'` / `recency='on'` or the new `since`/`until` filter):
+    //
+    //   effective_date         — content date (event_date / date / published /
+    //                            filename-date / fallback). Read by the new
+    //                            recency boost and date-filter paths only.
+    //                            Auto-link doesn't touch it (immune to
+    //                            updated_at churn).
+    //   effective_date_source  — sentinel for the doctor's effective_date_health
+    //                            check ('event_date' | 'date' | 'published' |
+    //                            'filename' | 'fallback'). The 'fallback' value
+    //                            is what surfaces "page that fell back to
+    //                            updated_at when frontmatter was unparseable".
+    //   import_filename        — basename without extension, captured at import.
+    //                            computeEffectiveDate uses it for filename-date
+    //                            precedence (daily/, meetings/ prefixes). Older
+    //                            rows leave it NULL; backfill falls through.
+    //   salience_touched_at    — bumped by recompute_emotional_weight when
+    //                            emotional_weight changes. Salience window
+    //                            uses GREATEST(updated_at, salience_touched_at)
+    //                            so newly-salient old pages enter the recent
+    //                            salience query.
+    //
+    // Plus an expression index used by since/until filters that read
+    // COALESCE(effective_date, updated_at). Partial-index claim from earlier
+    // plan iterations was wrong (codex pass-2 #15) — the planner won't use a
+    // partial index for the negative side of a COALESCE; expression index does.
+    //
+    // CONCURRENTLY + pre-drop guard (mirror of v34) on Postgres; plain CREATE
+    // INDEX on PGLite via the handler branching on engine.kind.
+    handler: async (engine) => {
+      // 1. ADD COLUMN x4. ALTER TABLE ADD COLUMN IF NOT EXISTS is idempotent.
+      //    No defaults, all nullable, all metadata-only on PG 11+ and PGLite.
+      await engine.runMigration(38, `
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS effective_date        TIMESTAMPTZ;
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS effective_date_source TEXT;
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS import_filename       TEXT;
+        ALTER TABLE pages ADD COLUMN IF NOT EXISTS salience_touched_at   TIMESTAMPTZ;
+      `);
+
+      // 2. Expression index for since/until date-range filters.
+      if (engine.kind === 'postgres') {
+        // Pre-drop any invalid index from a prior CONCURRENTLY failure.
+        await engine.runMigration(38, `
+          DO $$ BEGIN
+            IF EXISTS (
+              SELECT 1 FROM pg_index i
+              JOIN pg_class c ON c.oid = i.indexrelid
+              WHERE c.relname = 'pages_coalesce_date_idx' AND NOT i.indisvalid
+            ) THEN
+              EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS pages_coalesce_date_idx';
+            END IF;
+          END $$;
+        `);
+        await engine.runMigration(38, `
+          CREATE INDEX CONCURRENTLY IF NOT EXISTS pages_coalesce_date_idx
+            ON pages ((COALESCE(effective_date, updated_at)));
+        `);
+      } else {
+        await engine.runMigration(38, `
+          CREATE INDEX IF NOT EXISTS pages_coalesce_date_idx
+            ON pages ((COALESCE(effective_date, updated_at)));
+        `);
+      }
+    },
+    // CONCURRENTLY on Postgres requires no surrounding transaction.
+    transaction: false,
+  },
+  {
+    version: 42,
+    name: 'eval_candidates_recency_capture',
+    // v0.29.1 — capture agent-explicit recency + salience choices for replay
+    // reproducibility (D11 codex resolution).
+    //
+    // Without these fields, `gbrain eval replay` cannot reproduce a captured
+    // run: the live behavior depends on the resolved {salience, recency}
+    // values, which are absent from v0.29.0's eval_candidates schema. Replays
+    // of agent-explicit choices drift the same way as_of_ts replays drifted
+    // before being captured.
+    //
+    // All columns are nullable + additive. Pre-v0.29.1 rows stay valid. The
+    // NDJSON `schema_version` STAYS at 1 — the new fields are optional, and
+    // gbrain-evals consumers that don't know about them ignore them
+    // (standard permissive deserialization). No cross-repo coordination
+    // required (codex pass-1 #C2 dissolved).
+    //
+    //   as_of_ts            — brain's logical NOW at capture (replay uses
+    //                         this instead of wall-clock so old captures
+    //                         reproduce identically against today's brain).
+    //   salience_param      — what the caller passed (or NULL if omitted).
+    //   recency_param       — same for recency.
+    //   salience_resolved   — final value applied ('off' / 'on' / 'strong').
+    //   recency_resolved    — same for recency.
+    //   salience_source     — 'caller' or 'auto_heuristic'.
+    //   recency_source      — same for recency.
+    //
+    // ADD COLUMN with no DEFAULT is metadata-only on PG 11+ and PGLite —
+    // instant on tables of any size.
+    sql: `
+      ALTER TABLE eval_candidates ADD COLUMN IF NOT EXISTS as_of_ts          TIMESTAMPTZ;
+      ALTER TABLE eval_candidates ADD COLUMN IF NOT EXISTS salience_param    TEXT;
+      ALTER TABLE eval_candidates ADD COLUMN IF NOT EXISTS recency_param     TEXT;
+      ALTER TABLE eval_candidates ADD COLUMN IF NOT EXISTS salience_resolved TEXT;
+      ALTER TABLE eval_candidates ADD COLUMN IF NOT EXISTS recency_resolved  TEXT;
+      ALTER TABLE eval_candidates ADD COLUMN IF NOT EXISTS salience_source   TEXT;
+      ALTER TABLE eval_candidates ADD COLUMN IF NOT EXISTS recency_source    TEXT;
+    `,
+  },
+  {
+    version: 43,
+    name: 'takes_resolved_quality_and_drift_decisions',
+    // v0.30.0 (Slice A1, Universal Takes Epistemology wave). Bundles ALL schema
+    // for the v0.30 release wave so A2/B1/C1 add no migrations (codex F6 fix:
+    // schema-first ordering eliminates the cross-lane migrate.ts contention).
+    // Originally landed as v40 in the v0.30.0 branch; renumbered to v43 on
+    // merge with master after master claimed v40-v42 with the v0.29 +
+    // v0.29.1 salience-and-recency wave. Migration runner sorts by version
+    // number, so renumbering is a pure-rename — no semantic change.
+    //
+    // 1. takes.resolved_quality TEXT — 3-state outcome label (correct/incorrect/
+    //    partial) sitting alongside existing resolved_outcome BOOLEAN. Boolean
+    //    stays for back-compat reads; quality is the new source of truth for
+    //    calibration math. Backfill maps legacy resolved_outcome → quality.
+    //
+    // 2. takes_resolution_consistency CHECK constraint — fails contradictory
+    //    states like (quality='correct', outcome=false). 'partial' maps to
+    //    outcome=NULL because partial isn't a binary outcome. Added AFTER the
+    //    backfill so existing rows pass.
+    //
+    // 3. idx_takes_scorecard partial index on (holder, kind, resolved_quality)
+    //    WHERE resolved_quality IS NOT NULL — scorecard hot path. ~5KB on a
+    //    50K-row brain; makes scorecard O(log n) instead of full scan.
+    //
+    // 4. drift_decisions audit table — consumed by Slice C1 (v0.30.3) when
+    //    drift LLM judge ships. Defined here so C1 carries no migration.
+    //    Sized for one row per drift recommendation (insert-only, never
+    //    updated except for applied_at/applied_by when --auto-update lands).
+    sql: `
+      -- Step 1: add resolved_quality column with kind-of-outcome CHECK.
+      -- The (quality, outcome) consistency constraint comes AFTER the backfill
+      -- (Step 3) so existing legacy rows don't fail the new constraint.
+      ALTER TABLE takes
+        ADD COLUMN IF NOT EXISTS resolved_quality TEXT
+          CHECK (resolved_quality IS NULL OR resolved_quality IN ('correct','incorrect','partial'));
+
+      -- Step 2: backfill from legacy boolean. Idempotent: only writes rows
+      -- where quality is still NULL and outcome is set. Re-runs are no-ops.
+      UPDATE takes
+      SET resolved_quality = CASE resolved_outcome
+        WHEN true  THEN 'correct'
+        WHEN false THEN 'incorrect'
+      END
+      WHERE resolved_outcome IS NOT NULL AND resolved_quality IS NULL;
+
+      -- Step 3: (quality, outcome) consistency constraint. Drop-then-recreate
+      -- so re-runs converge. The named constraint lets us evolve it later.
+      ALTER TABLE takes DROP CONSTRAINT IF EXISTS takes_resolution_consistency;
+      ALTER TABLE takes ADD CONSTRAINT takes_resolution_consistency CHECK (
+        (resolved_quality IS NULL     AND resolved_outcome IS NULL)
+        OR (resolved_quality = 'correct'   AND resolved_outcome = true)
+        OR (resolved_quality = 'incorrect' AND resolved_outcome = false)
+        OR (resolved_quality = 'partial'   AND resolved_outcome IS NULL)
+      );
+
+      -- Step 4: scorecard hot path. Partial index keeps footprint proportional
+      -- to resolved-take count, not table size.
+      CREATE INDEX IF NOT EXISTS idx_takes_scorecard
+        ON takes (holder, kind, resolved_quality)
+        WHERE resolved_quality IS NOT NULL;
+
+      -- Step 5: drift_decisions audit table (consumed by Slice C1 in v0.30.3).
+      CREATE TABLE IF NOT EXISTS drift_decisions (
+        id                  BIGSERIAL   PRIMARY KEY,
+        take_id             BIGINT      NOT NULL REFERENCES takes(id) ON DELETE CASCADE,
+        page_id             INTEGER     NOT NULL,
+        row_num             INTEGER     NOT NULL,
+        recommended_weight  REAL        NOT NULL CHECK (recommended_weight >= 0 AND recommended_weight <= 1),
+        reasoning           TEXT,
+        decided_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+        applied_at          TIMESTAMPTZ,
+        applied_by          TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_drift_decisions_take       ON drift_decisions(take_id);
+      CREATE INDEX IF NOT EXISTS idx_drift_decisions_decided_at ON drift_decisions(decided_at DESC);
+
+      -- RLS for the new table (Postgres-only — PGLite has no RLS engine).
+      -- Mirrors the v37 takes/synthesis_evidence pattern: only flip RLS on
+      -- when running as a BYPASSRLS role so non-BYPASSRLS apps still read.
+      DO $$
+      DECLARE
+        has_bypass BOOLEAN;
+      BEGIN
+        SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+        IF has_bypass THEN
+          ALTER TABLE drift_decisions ENABLE ROW LEVEL SECURITY;
+        END IF;
+      END $$;
+    `,
+    sqlFor: {
+      // PGLite: same DDL minus the RLS DO-block. Single-tenant by definition.
+      pglite: `
+        ALTER TABLE takes
+          ADD COLUMN IF NOT EXISTS resolved_quality TEXT
+            CHECK (resolved_quality IS NULL OR resolved_quality IN ('correct','incorrect','partial'));
+
+        UPDATE takes
+        SET resolved_quality = CASE resolved_outcome
+          WHEN true  THEN 'correct'
+          WHEN false THEN 'incorrect'
+        END
+        WHERE resolved_outcome IS NOT NULL AND resolved_quality IS NULL;
+
+        ALTER TABLE takes DROP CONSTRAINT IF EXISTS takes_resolution_consistency;
+        ALTER TABLE takes ADD CONSTRAINT takes_resolution_consistency CHECK (
+          (resolved_quality IS NULL     AND resolved_outcome IS NULL)
+          OR (resolved_quality = 'correct'   AND resolved_outcome = true)
+          OR (resolved_quality = 'incorrect' AND resolved_outcome = false)
+          OR (resolved_quality = 'partial'   AND resolved_outcome IS NULL)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_takes_scorecard
+          ON takes (holder, kind, resolved_quality)
+          WHERE resolved_quality IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS drift_decisions (
+          id                  BIGSERIAL   PRIMARY KEY,
+          take_id             BIGINT      NOT NULL REFERENCES takes(id) ON DELETE CASCADE,
+          page_id             INTEGER     NOT NULL,
+          row_num             INTEGER     NOT NULL,
+          recommended_weight  REAL        NOT NULL CHECK (recommended_weight >= 0 AND recommended_weight <= 1),
+          reasoning           TEXT,
+          decided_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+          applied_at          TIMESTAMPTZ,
+          applied_by          TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_drift_decisions_take       ON drift_decisions(take_id);
+        CREATE INDEX IF NOT EXISTS idx_drift_decisions_decided_at ON drift_decisions(decided_at DESC);
+      `,
+    },
+  },
+  {
+    version: 44,
+    name: 'pages_emotional_weight_recomputed_at',
+    idempotent: true,
+    // v0.30.1 (Codex X4 / Finding P2): emotional_weight = 0 is a VALID
+    // steady-state value (migration v40 default). Indexing WHERE = 0
+    // would be a permanent large index over normal data, not a backlog
+    // index. The actual backlog predicate is "never recomputed" — for
+    // that we need a separate timestamp column. ADD COLUMN with NULL
+    // default is metadata-only on PG 11+ and PGLite — instant on tables
+    // of any size.
+    //
+    // The recompute-emotional-weight cycle phase + the new
+    // `gbrain backfill emotional_weight` command both stamp this column
+    // with NOW() alongside the weight write, so existing rows progress
+    // out of the backlog naturally as the cycle runs.
+    //
+    // Partial index: idx_pages_emotional_weight_pending lives on
+    // `(id) WHERE emotional_weight_recomputed_at IS NULL` and is created
+    // on first run by the backfill primitive (CONCURRENTLY) rather than
+    // here, because schema-time CREATE INDEX isn't CONCURRENTLY-friendly
+    // when the SCHEMA_SQL replay runs in a transaction.
+    sql: `
+      ALTER TABLE pages ADD COLUMN IF NOT EXISTS emotional_weight_recomputed_at TIMESTAMPTZ;
+    `,
+  {
+    version: 45,
     name: 'facts_hot_memory_v0_31',
     // v0.31: hot memory layer — real-time working memory queryable across
     // sessions. Sits alongside `takes` (cold, markdown-mirrored) as the
@@ -2056,6 +2424,68 @@ async function checkForBlockingConnections(engine: BrainEngine): Promise<boolean
 }
 
 /**
+ * v0.30.1 (Cherry D3 / Finding F2): wrap a migration attempt in 3-attempt
+ * retry+backoff (5s/15s/45s). Retry only on statement_timeout (57014) or
+ * connection-reset patterns; other errors fail loud immediately.
+ *
+ * Before each retry: log idle-in-transaction blockers so the user knows
+ * which PID is holding the lock. After exhaustion: throw
+ * `MigrationRetryExhausted` with the named PID + suggested
+ * pg_terminate_backend command.
+ */
+async function runMigrationSQLWithRetry(
+  engine: BrainEngine,
+  m: Migration,
+  sql: string,
+): Promise<void> {
+  const { isStatementTimeoutError, isRetryableConnError } = await import('./retry-matcher.ts');
+  // GBRAIN_MIGRATE_BACKOFF_MS lets tests skip the 5s/15s/45s backoff. In
+  // production the env var is unset and the default cadence applies.
+  const fastBackoff = process.env.GBRAIN_MIGRATE_BACKOFF_MS;
+  const backoffs = fastBackoff !== undefined
+    ? [parseInt(fastBackoff, 10) || 0, parseInt(fastBackoff, 10) || 0, parseInt(fastBackoff, 10) || 0]
+    : [5000, 15000, 45000];
+  let lastErr: Error | null = null;
+  let lastBlockers: IdleBlocker[] = [];
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      // Pre-attempt diagnostic: if there are idle blockers, log them so
+      // the operator can see what we're racing against. Cherry D3.
+      if (attempt > 0) {
+        lastBlockers = await getIdleBlockers(engine);
+        if (lastBlockers.length > 0) {
+          console.warn(`  [retry ${attempt}/3] ${lastBlockers.length} idle-in-transaction blocker(s):`);
+          for (const b of lastBlockers) {
+            console.warn(`    PID ${b.pid} idle since ${b.query_start} — ${b.query.slice(0, 80)}`);
+          }
+        }
+      }
+      await runMigrationSQL(engine, m, sql);
+      return;
+    } catch (err: unknown) {
+      lastErr = err instanceof Error ? err : new Error(String(err));
+      const retryable = isStatementTimeoutError(err) || isRetryableConnError(err);
+      if (!retryable || attempt === 2) {
+        // Final failure: capture blockers + throw enriched envelope when
+        // retry-eligible (named-PID UX from F2). Non-retryable errors fall
+        // through to the existing 57014 handler in runMigrations.
+        if (retryable) {
+          lastBlockers = await getIdleBlockers(engine);
+          throw new MigrationRetryExhausted(m.version, m.name, attempt + 1, lastBlockers, lastErr);
+        }
+        throw err;
+      }
+      const delay = backoffs[attempt];
+      console.warn(`  [retry ${attempt + 1}/3] ${m.name} hit ${lastErr.message.slice(0, 80)}; retrying in ${delay}ms`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  // Defensive: shouldn't reach here.
+  if (lastErr) throw lastErr;
+}
+
+/**
  * Wrap migration SQL execution with Supabase-compatible timeout.
  * Uses SET LOCAL statement_timeout inside a transaction to override
  * server-enforced timeouts (required for Supabase Postgres).
@@ -2162,22 +2592,34 @@ export async function runMigrations(engine: BrainEngine): Promise<{ applied: num
 
     if (sql) {
       try {
-        await runMigrationSQL(engine, m, sql);
+        // v0.30.1: retry wrapper handles statement_timeout + conn-reset
+        // across 3 attempts (5s/15s/45s). Other errors throw immediately.
+        await runMigrationSQLWithRetry(engine, m, sql);
       } catch (err: unknown) {
         // Actionable diagnostics for statement timeout (Postgres error 57014).
         // Shape matches the 4-part error standard (what / why / fix / verify).
         const code = (err as { code?: string })?.code;
-        if (code === '57014') {
-          console.error(`\n❌ Migration ${m.version} (${m.name}) hit statement_timeout (SQLSTATE 57014).`);
-          console.error('');
-          console.error('   Cause: another connection holds a lock on the target table, or the');
-          console.error('   server statement_timeout (~2 min on Supabase) is too short for this DDL.');
-          console.error('');
-          console.error('   Fix:');
-          console.error('     1. gbrain doctor --locks    # find idle-in-transaction blockers');
-          console.error('     2. Terminate blocker(s) shown by step 1 via pg_terminate_backend(<pid>)');
-          console.error('     3. gbrain apply-migrations --yes  # re-run from the version that failed');
-          console.error('');
+        if (code === '57014' || err instanceof MigrationRetryExhausted) {
+          console.error(`\n❌ Migration ${m.version} (${m.name}) ${err instanceof MigrationRetryExhausted ? 'exhausted retries' : 'hit statement_timeout (SQLSTATE 57014)'}.`);
+          if (err instanceof MigrationRetryExhausted && err.lastBlockers.length > 0) {
+            const b = err.lastBlockers[0];
+            console.error('');
+            console.error(`   Likely blocker: PID ${b.pid}, idle since ${b.query_start}`);
+            console.error(`   Query: ${b.query.slice(0, 120)}`);
+            console.error('');
+            console.error(`   Recovery: psql ... -c "SELECT pg_terminate_backend(${b.pid})"`);
+            console.error('');
+          } else {
+            console.error('');
+            console.error('   Cause: another connection holds a lock on the target table, or the');
+            console.error('   server statement_timeout (~2 min on Supabase) is too short for this DDL.');
+            console.error('');
+            console.error('   Fix:');
+            console.error('     1. gbrain doctor --locks    # find idle-in-transaction blockers');
+            console.error('     2. Terminate blocker(s) shown by step 1 via pg_terminate_backend(<pid>)');
+            console.error('     3. gbrain apply-migrations --yes  # re-run from the version that failed');
+            console.error('');
+          }
           console.error('   Verify:');
           console.error('     gbrain doctor              # schema_version should match latest');
           console.error('');
@@ -2189,6 +2631,30 @@ export async function runMigrations(engine: BrainEngine): Promise<{ applied: num
     // Application-level handler (runs outside transaction for flexibility)
     if (m.handler) {
       await m.handler(engine);
+    }
+
+    // v0.30.1 (D6): post-condition probe. If a verify hook is declared, run
+    // it before bumping config.version. When verify returns false, check
+    // idempotent — if true, log + retry the same migration once; if false,
+    // throw MigrationDriftError so operator runs --skip-verify deliberately.
+    if (m.verify) {
+      const verifyOk = await m.verify(engine).catch(() => false);
+      if (!verifyOk) {
+        const idempotent = isMigrationIdempotent(m);
+        if (idempotent) {
+          console.warn(`  [${m.version}] ⚠️  verify failed; re-running idempotent migration once`);
+          if (sql) await runMigrationSQLWithRetry(engine, m, sql);
+          if (m.handler) await m.handler(engine);
+          // Best-effort: don't double-throw if second run still fails verify.
+          // Operator's next run of doctor will re-detect drift.
+        } else {
+          throw new MigrationDriftError(
+            m.version,
+            m.name,
+            `Schema does not match expected post-condition. Run with --skip-verify to force.`,
+          );
+        }
+      }
     }
 
     // Update version after both SQL and handler succeed

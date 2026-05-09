@@ -485,6 +485,8 @@ Run `gbrain integrations` to see status.
 
 The repo is the system of record. GBrain is the retrieval layer. The agent reads and writes through both. Human always wins... edit any markdown file and `gbrain sync` picks up the changes.
 
+For multi-machine setups (cross-machine thin client) and multi-worktree setups (per-worktree code engine + shared remote artifacts), see [`docs/architecture/topologies.md`](docs/architecture/topologies.md).
+
 ## The Knowledge Model
 
 Every page follows the compiled truth + timeline pattern:
@@ -765,9 +767,12 @@ ADMIN
                                         $GBRAIN_HOME/clones/<id>/ and re-cloned on sync if
                                         it goes missing. Also exposed via MCP for remote
                                         agent setup (whoami + sources_{add,list,remove,status}).
-  gbrain dream [--dry-run] [--phase N]  10-phase maintenance cycle (lint→backlinks→sync→synthesize
-                                        →extract→patterns→consolidate→embed→orphans→purge).
-                                        v0.31: consolidate phase promotes hot facts into takes overnight.
+  gbrain dream [--dry-run] [--phase N]  11-phase maintenance cycle (lint→backlinks→sync→synthesize
+                                        →extract→patterns→recompute_emotional_weight→consolidate
+                                        →embed→orphans→purge). v0.23 added synthesize + patterns.
+                                        v0.29 added emotional-weight recompute. v0.30.2: synthesize
+                                        chunks fat transcripts. v0.31: consolidate promotes hot facts
+                                        into takes overnight.
   gbrain dream --input <file>           Ad-hoc transcript synthesis (implies --phase synthesize)
   gbrain dream --date YYYY-MM-DD        Synthesize a single day; --from/--to for backfill ranges
 
