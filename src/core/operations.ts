@@ -597,7 +597,7 @@ const put_page: Operation = {
       ...(factsQueued ? { facts_backstop: factsQueued } : {}),
     };
   },
-  cliHints: { name: 'put', positional: ['stdin'] },
+  cliHints: { name: 'put', positional: ['slug'], stdin: 'content' },
 };
 
 /**
