@@ -124,6 +124,10 @@ export function slugify(raw: string): string {
   return raw
     .toLowerCase()
     .normalize('NFKD')
+    // NFKD decomposes accents into combining marks (U+0300..U+036F);
+    // strip them before replacing the rest with hyphens so "è" → "e",
+    // not "e" + "-".
+    .replace(/[̀-ͯ]/g, '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-+|-+$/g, '');
