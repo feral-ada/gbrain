@@ -1889,11 +1889,17 @@ export const MIGRATIONS: Migration[] = [
       //   VECTOR(n)  → vector_cosine_ops
       //   HALFVEC(n) → halfvec_cosine_ops
       const opclass = useHalfvec ? 'halfvec_cosine_ops' : 'vector_cosine_ops';
+      // FK to sources is added in a separate ALTER TABLE rather than inline
+      // on the column. Inline `REFERENCES` worked on PGLite but silently
+      // got dropped by postgres.js's `unsafe()` multi-statement path on
+      // Postgres in the v0.31 e2e run (table created without FK; CASCADE
+      // delete didn't fire). Splitting the FK declaration out makes the
+      // intent explicit and idempotent: the named constraint either
+      // exists or doesn't, and the ALTER is a no-op on re-runs.
       const factsDDL = `
         CREATE TABLE IF NOT EXISTS facts (
           id                BIGSERIAL PRIMARY KEY,
-          source_id         TEXT        NOT NULL DEFAULT 'default'
-                            REFERENCES sources(id) ON DELETE CASCADE,
+          source_id         TEXT        NOT NULL DEFAULT 'default',
           entity_slug       TEXT,
           fact              TEXT        NOT NULL,
           kind              TEXT        NOT NULL DEFAULT 'fact'
@@ -1915,6 +1921,18 @@ export const MIGRATIONS: Migration[] = [
           embedded_at       TIMESTAMPTZ,
           created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
         );
+
+        DO $$ BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'facts_source_id_fkey'
+              AND conrelid = 'facts'::regclass
+          ) THEN
+            ALTER TABLE facts
+              ADD CONSTRAINT facts_source_id_fkey
+              FOREIGN KEY (source_id) REFERENCES sources(id) ON DELETE CASCADE;
+          END IF;
+        END $$;
 
         CREATE INDEX IF NOT EXISTS idx_facts_entity_active
           ON facts(source_id, entity_slug, valid_from DESC)
