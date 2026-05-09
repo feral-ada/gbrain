@@ -13,9 +13,10 @@ substantive turn extracts facts via a cheap Haiku pass into a per-source
 `facts` table, exposed through `gbrain recall`. The MCP `_meta.brain_hot_memory`
 channel auto-injects relevant facts on every tool-call response so Claude
 Code, Claude Desktop, and any OAuth HTTP client see the brain's hot memory
-without having to ask. The dream cycle's new 10th phase `consolidate`
-clusters related facts and promotes them into durable `takes(kind='fact')`
-overnight. Facts stay as the audit trail.
+without having to ask. The dream cycle's new `consolidate` phase clusters
+related facts and promotes them into durable `takes(kind='fact')` overnight,
+landing as the 11th phase between `recompute_emotional_weight` (v0.29) and
+`embed`. Facts stay as the audit trail.
 
 ### The cross-session test
 
@@ -70,7 +71,7 @@ PGLite test (CI default) and a Postgres parity test
   code path stdio uses (closes the v0.22.7 anti-drift contract for HTTP).
 - **`ErrorCode` opens.** TS forward-compat via `(string & {})` so
   downstream consumers (gbrain-evals etc) don't break on every new code.
-- **Dream-cycle 10th phase `consolidate`.** Between `patterns` and `embed`.
+- **Dream-cycle 11th phase `consolidate`.** Between `recompute_emotional_weight` and `embed`.
   Clusters facts ≥3-strong + ≥24h-old per (source, entity), greedy cosine
   threshold 0.85, picks highest-confidence claim as the take, INSERTs
   into `takes(kind='fact')`, marks contributing facts `consolidated_at` +
@@ -78,7 +79,8 @@ PGLite test (CI default) and a Postgres parity test
 
 ### Itemized changes
 
-- Schema migration v40 in `src/core/migrate.ts`. New `facts` table with
+- Schema migration v45 in `src/core/migrate.ts` (renumbered from v40 during the
+  merge with master, which added v40-v44 in v0.29/v0.30). New `facts` table with
   `source_id` (TEXT FK to sources, per-source isolation, NOT brain_id),
   `kind` CHECK constraint, `visibility` CHECK (private/world for
   takes-style ACL parity), temporal columns
