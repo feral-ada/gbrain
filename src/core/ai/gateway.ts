@@ -359,6 +359,103 @@ export function isAvailable(touchpoint: TouchpointKind): boolean {
 
 // ---- Embedding ----
 
+/**
+ * Voyage AI compatibility shim. Voyage's `/v1/embeddings` endpoint is OpenAI-shaped
+ * but diverges on two parameters:
+ *   - `encoding_format` only accepts `'base64'` (the AI SDK sends `'float'` by default,
+ *     which makes Voyage respond with HTTP 400). Force `'base64'` so the SDK round-trip
+ *     parses correctly.
+ *   - OpenAI's `dimensions` parameter is rejected; Voyage uses `output_dimension`.
+ *     Translate the field name when the caller explicitly requested a dimension.
+ *
+ * The mutated body is what gets sent on the wire; the AI SDK still receives a
+ * base64-encoded response and decodes it as expected.
+ */
+// Cast through `unknown` because Bun's `typeof fetch` extends the standard
+// signature with a `preconnect` method that arrow functions can't provide.
+// The AI SDK only invokes the call signature; the Bun extension is irrelevant
+// here. Without this cast, `tsc --noEmit` fails:
+//   error TS2741: Property 'preconnect' is missing in type
+//   '(input: RequestInfo | URL, init: RequestInit | ...) => Promise<Response>'
+//   but required in type 'typeof fetch'.
+const voyageCompatFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  // OUTBOUND: rewrite request body for Voyage's actual API contract.
+  if (init?.body && typeof init.body === 'string') {
+    try {
+      const parsed = JSON.parse(init.body);
+      if (parsed && typeof parsed === 'object') {
+        let mutated = false;
+        // Voyage rejects 'float' (the SDK default). Force the value Voyage accepts.
+        if (parsed.encoding_format !== 'base64') {
+          parsed.encoding_format = 'base64';
+          mutated = true;
+        }
+        // Translate OpenAI's `dimensions` to Voyage's `output_dimension`.
+        if ('dimensions' in parsed) {
+          const dims = parsed.dimensions;
+          delete parsed.dimensions;
+          if (typeof dims === 'number') parsed.output_dimension = dims;
+          mutated = true;
+        }
+        if (mutated) {
+          const newBody = JSON.stringify(parsed);
+          // Drop Content-Length so fetch recomputes from the new body.
+          const headers = new Headers(init.headers ?? {});
+          headers.delete('content-length');
+          init = { ...init, body: newBody, headers };
+        }
+      }
+    } catch {
+      // Body wasn't JSON — pass through untouched.
+    }
+  }
+
+  const resp = await fetch(input, init);
+  if (!resp.ok) return resp;
+  const ct = resp.headers.get('content-type') ?? '';
+  if (!ct.toLowerCase().includes('application/json')) return resp;
+
+  // INBOUND: rewrite response so the AI SDK's Zod schema validates.
+  // Voyage diverges from OpenAI in two places that break the parser:
+  //   - `embedding` is a base64 string (SDK schema expects `number[]`)
+  //   - `usage` lacks `prompt_tokens` (SDK schema requires it when usage present)
+  try {
+    const json: any = await resp.clone().json();
+    if (!json || typeof json !== 'object') return resp;
+    let modified = false;
+    if (Array.isArray(json.data)) {
+      for (const item of json.data) {
+        if (item && typeof item.embedding === 'string') {
+          // Voyage returns Float32 little-endian base64.
+          const bytes = Buffer.from(item.embedding, 'base64');
+          const floats = new Float32Array(
+            bytes.buffer,
+            bytes.byteOffset,
+            Math.floor(bytes.byteLength / 4),
+          );
+          item.embedding = Array.from(floats);
+          modified = true;
+        }
+      }
+    }
+    if (json.usage && typeof json.usage === 'object' && json.usage.prompt_tokens === undefined) {
+      json.usage.prompt_tokens = typeof json.usage.total_tokens === 'number'
+        ? json.usage.total_tokens
+        : 0;
+      modified = true;
+    }
+    if (!modified) return resp;
+    return new Response(JSON.stringify(json), {
+      status: resp.status,
+      statusText: resp.statusText,
+      headers: resp.headers,
+    });
+  } catch {
+    // If parsing/transformation fails, fall back to the original response.
+    return resp;
+  }
+}) as unknown as typeof fetch;
+
 async function resolveEmbeddingProvider(modelStr: string): Promise<{ model: any; recipe: Recipe; modelId: string }> {
   const { parsed, recipe } = resolveRecipe(modelStr);
   assertTouchpoint(recipe, 'embedding', parsed.modelId);
@@ -407,10 +504,15 @@ function instantiateEmbedding(recipe: Recipe, modelId: string, cfg: AIGatewayCon
       const auth = applyResolveAuth(recipe, cfg, 'embedding');
       // v0.32: env-templated base URL + optional fetch wrapper for Azure.
       const compat = applyOpenAICompatConfig(recipe, cfg);
+      // Voyage's openai-compat path needs voyageCompatFetch (translates
+      // request/response shape) when the recipe doesn't ship its own fetch
+      // wrapper via resolveOpenAICompatConfig. Azure recipes ship their own
+      // fetch (api-version splice); voyage doesn't — use voyageCompatFetch.
+      const fetchWrapper = compat.fetch ?? (recipe.id === 'voyage' ? voyageCompatFetch : undefined);
       const client = createOpenAICompatible({
         name: recipe.id,
         baseURL: compat.baseURL,
-        ...(compat.fetch ? { fetch: compat.fetch } : {}),
+        ...(fetchWrapper ? { fetch: fetchWrapper } : {}),
         ...auth,
       });
       return client.textEmbeddingModel(modelId);

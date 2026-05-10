@@ -242,13 +242,13 @@ export async function runPhaseSynthesize(
     const config = await loadSynthConfig(engine);
 
     // Allow ad-hoc --input to run even when config is disabled.
-    if (!opts.inputFile && !config.enabled) {
-      return skipped('not_configured',
-        'dream.synthesize.enabled is false (set dream.synthesize.session_corpus_dir to enable)');
-    }
     if (!opts.inputFile && !config.corpusDir) {
       return skipped('not_configured',
         'dream.synthesize.session_corpus_dir is unset');
+    }
+    if (!opts.inputFile && !config.enabled) {
+      return skipped('not_configured',
+        'dream.synthesize.enabled is explicitly false');
     }
 
     // Cooldown check (skipped for explicit --input / --date / --from / --to runs).
@@ -520,8 +520,11 @@ interface SynthConfig {
 }
 
 async function loadSynthConfig(engine: BrainEngine): Promise<SynthConfig> {
-  const enabled = (await engine.getConfig('dream.synthesize.enabled')) === 'true';
+  const enabledRaw = await engine.getConfig('dream.synthesize.enabled');
   const corpusDir = await engine.getConfig('dream.synthesize.session_corpus_dir');
+  // v2: enabled defaults to true when corpus dir is configured, false otherwise.
+  // Explicit enabled=false still wins for pausing synthesis without removing corpus config.
+  const enabled = enabledRaw === 'false' ? false : (enabledRaw === 'true' || !!corpusDir);
   const meetingTranscriptsDir = await engine.getConfig('dream.synthesize.meeting_transcripts_dir');
   const minCharsStr = await engine.getConfig('dream.synthesize.min_chars');
   const excludeStr = await engine.getConfig('dream.synthesize.exclude_patterns');
@@ -779,14 +782,16 @@ async function collectChildPutPageSlugs(
 ): Promise<string[]> {
   if (childIds.length === 0) return [];
   // Raw fetch — NO SELECT DISTINCT. Preserves per-child slug duplicates so
-  // the orchestrator sees what each child wrote.
+  // the orchestrator sees what each child wrote. COALESCE handles both
+  // properly-stored jsonb objects (input->>'slug') and double-encoded jsonb
+  // strings from pre-fix data ((input #>> '{}')::jsonb->>'slug').
   const rows = await engine.executeRaw<{ job_id: number; slug: string }>(
-    `SELECT job_id, input->>'slug' AS slug
+    `SELECT job_id,
+            COALESCE(input->>'slug', (input #>> '{}')::jsonb->>'slug') AS slug
        FROM subagent_tool_executions
       WHERE job_id = ANY($1::int[])
         AND tool_name = 'brain_put_page'
-        AND status = 'complete'
-        AND input ? 'slug'`,
+        AND status = 'complete'`,
     [childIds],
   );
   const rewritten = new Set<string>();
@@ -987,3 +992,11 @@ function failed(error: PhaseError): PhaseResult {
 function makeError(cls: string, code: string, message: string, hint?: string): PhaseError {
   return hint ? { class: cls, code, message, hint } : { class: cls, code, message };
 }
+
+// ── Test-only export ───────────────────────────────────────
+// `__testing` re-exports otherwise-private helpers so unit tests can pin
+// behavior at function granularity (e.g., #745 collectChildPutPageSlugs
+// double-encoded jsonb regression). Not part of the runtime contract.
+export const __testing = {
+  collectChildPutPageSlugs,
+};
