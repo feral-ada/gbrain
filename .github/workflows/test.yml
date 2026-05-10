@@ -40,22 +40,9 @@ jobs:
         run: bun run verify
       - name: Run test shard ${{ matrix.shard }}/4
         run: scripts/test-shard.sh ${{ matrix.shard }} 4
-
-  # Serial tests run in their own job because *.serial.test.ts files use
-  # mock.module() which leaks across files in the same bun-test process.
-  # Quarantining them here mirrors the local fast-loop convention (`bun run
-  # test:serial` is invoked separately from the parallel shard runs). Without
-  # this split, mock.module substitutions from one serial file break tests
-  # in other files in the same shard — exactly the regression that surfaced
-  # when eval-takes-quality-runner.serial.test.ts's mock leaked into
-  # voyage-multimodal.test.ts and broke 18 of its 22 tests.
-  test-serial:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-        with:
-          bun-version: latest
-      - run: bun install
-      - name: Run *.serial.test.ts files (max-concurrency=1)
+      - name: Run *.serial.test.ts at --max-concurrency=1 (shard 1 only)
+        # Serial files share file-wide state (top-level mock.module, module
+        # singletons) that leaks across files in the same bun-test process.
+        # test-shard.sh excludes them; this step runs them at concurrency=1.
+        if: matrix.shard == 1
         run: bun run test:serial
