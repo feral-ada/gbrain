@@ -2,6 +2,140 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.31.1] - 2026-05-08
+
+**Thin-client mode actually works now. `gbrain init --mcp-only` is no longer a half-built bridge.**
+**Every read + write + admin op routes through MCP; refused commands carry pinpoint hints.**
+
+Hermes/Neuromancer hit this in production: thin-client install of wintermute (102k pages,
+265k chunks). Every CLI search returned zero rows. Exit code 0. No warning. The agent
+configured `gbrain init --mcp-only`, then walked into a wall of "no results found" against
+a brain that had everything it needed. The CLI was opening the empty local PGLite,
+running 38 migrations, and reporting "No results." while the real brain sat untouched
+behind an HTTPS endpoint.
+
+v0.31.1 fixes the silent-empty-results bug class for every operation surface gbrain has.
+The CLI dispatch layer now routes every non-localOnly op through `callRemoteTool` when
+`isThinClient(cfg)` is true, before opening any local engine. Read ops, write ops, admin
+ops — all routed. Local-only commands (sync, embed, dream, integrity, etc) refuse with
+pinpoint hints naming the closest path: "sync runs on the host. To trigger a remote
+cycle, run `gbrain remote ping` (queues an autopilot-cycle job)."
+
+### The numbers that matter
+
+Reproducible against any host with a populated brain. Spin `gbrain serve --http`,
+register an OAuth client with `read,write,admin`, then from a second `GBRAIN_HOME`:
+
+| Behavior | v0.30.0 (broken) | v0.31.1 (fixed) |
+|---|---|---|
+| `gbrain search "X"` against 102k-page host | "No results." (exit 0) | Real rows + identity banner |
+| `gbrain stats` on thin-client | Pages: 0, Chunks: 0 | Real numbers from host |
+| `gbrain salience` | "(no pages touched in the salience window)" | Real salience output |
+| `gbrain put 'wiki/test/foo' --content '...'` | Hits empty local DB | Persists on host |
+| `gbrain sync` | Falls into PGLite migrations | Refuses with `gbrain remote ping` hint |
+| `gbrain remote doctor` checks | 4 (config, oauth, discovery, smoke) | 5 (+ scope-probe with pinpoint remediation) |
+| Identity feedback per command | None | `[thin-client → host:3131 · brain: 102k pages, 265k chunks · v0.31.1]` |
+
+Per-call latency adds ~50-200ms warm (token cache hit), ~250-500ms cold (token mint).
+Documented; users who want sub-50ms loops should run on the host.
+
+### What this means for thin-client users
+
+A thin-client `gbrain` install is now functionally substitutable for a local install
+on the read+write+admin op surface. Agents get the topology signal up-front via the
+identity banner; humans get pinpoint hints when something is genuinely local-only.
+The OAuth-scope-mismatch class of failures (v0.29.2/v0.30.0 thin-clients registered
+with `read+write` only and now hitting `gbrain stats`) surfaces during
+`gbrain remote doctor` instead of mid-command, with an exact remediation:
+
+  `On the host: gbrain auth register-client <name> --grant-types client_credentials --scopes read,write,admin`
+
+## To take advantage of v0.31.1
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain remote doctor`
+warns about the new `oauth_client_scopes_probe` check:
+
+1. **On the THIN CLIENT** — re-run doctor to surface scope mismatches:
+   ```bash
+   gbrain remote doctor
+   ```
+   The new `oauth_client_scopes_probe` check reports per-tier status. If admin is
+   missing, the check tells you the exact host-side command to run.
+
+2. **On the HOST (if doctor warned about admin scope)** — re-register your thin-client's
+   OAuth client with broader scopes:
+   ```bash
+   gbrain auth register-client <name> --grant-types client_credentials --scopes read,write,admin
+   ```
+   Then update the thin-client's `~/.gbrain/config.json` `remote_mcp.oauth_client_id`
+   and (env-var or config) `oauth_client_secret` with the new credentials.
+
+3. **Verify routing works** — run a representative read op that previously returned zero:
+   ```bash
+   gbrain search "anything you know is in the brain"
+   gbrain stats
+   ```
+   Both should now show real numbers and an identity banner like
+   `[thin-client → wintermute:3131 · brain: 102k pages, 265k chunks · v0.31.1]`.
+
+4. **If any step fails or the numbers look wrong**, file an issue at
+   https://github.com/garrytan/gbrain/issues with `gbrain remote doctor` output.
+
+### Itemized changes
+
+#### Routing
+- New `THIN_CLIENT_REFUSE_HINTS` table in `src/cli.ts` with pinpoint hints for every
+  refused command (sync/embed/extract/migrate/repair-jsonb/integrity/serve/dream/
+  orphans/transcripts/storage/takes/sources). Hints name the closest remote path
+  (e.g. `gbrain remote ping`) or specific MCP tools (e.g. `find_orphans`).
+- New `runThinClientRouted` in cli.ts hooks INTO the existing op-dispatch path
+  (CDX-1: no parallel module). Every non-localOnly op routes through `callRemoteTool`
+  on thin-client installs.
+- CLI-only commands with MCP equivalents (`think`, `salience`, `anomalies`,
+  `graph-query`) get per-command thin-client routing branches.
+- ENG-2 renderer parity: local-engine path runs `JSON.parse(JSON.stringify(result))`
+  before formatting so renderers see the same shape on both paths.
+
+#### New ops
+- `get_brain_identity` (read scope, banner-only): cheap counter packet
+  `{version, engine, page_count, chunk_count, last_sync_iso}` for the thin-client
+  identity banner.
+
+#### Banner
+- Identity banner prints to stderr before each routed command. 60s TTL in-memory
+  cache keyed by mcp_url. Suppression: `--quiet`, `GBRAIN_NO_BANNER=1`, non-TTY
+  default (override with `GBRAIN_BANNER=1`).
+
+#### Doctor
+- New `oauth_client_scopes_probe` check (CDX-5) in `gbrain remote doctor`. Surfaces
+  v0.29.2/v0.30.0 thin-clients without admin scope BEFORE they hit
+  `gbrain stats`/`gbrain history` mid-command.
+
+#### Error handling
+- Hardened `callRemoteTool` (CDX-4): all transport errors normalized to
+  `RemoteMcpError` with stable `reason` union and `kind`/`code` sub-tags on detail.
+  Dispatcher's exhaustive TS `never` switch produces canned, actionable messages.
+- New `--timeout=Ns` global flag (ENG-4); SIGINT aborts via AbortController.
+
+#### Tests
+- New `test/get-brain-identity.test.ts` (9), `test/oauth-scope-probe.test.ts` (8).
+- Updated `test/cli-options.test.ts` (+8 --timeout cases, 28 total).
+- Updated `test/cli-dispatch-thin-client.test.ts` (14 cases, refreshed for new
+  pinpoint-hint format).
+
+### For contributors
+- Plan + decision history at `~/.claude/plans/how-to-make-mcp-iterative-liskov.md`.
+  Records 6 CEO-review decisions (D1-D6), 5 eng-review decisions (ENG-1..5), and
+  6 codex outside-voice decisions (CDX-1..6). Codex's #1+#8 forced an architecture
+  rewrite (no parallel `src/core/thin-client/` module; route inline in cli.ts).
+  Codex's #2+#7 forced honest framing (no false "Liskov substitutability" claim
+  — server intentionally treats remote callers differently for `think.--save`/
+  `--take` and `put_page` auto-link, both trust-boundary policy decisions).
+  Codex's #5 caught a false premise in the error-model design.
+- Per-subcommand thin-client routing for `takes` and `sources` is a v0.31.x
+  follow-up TODO. v0.31.1 refuses both at the top level with hints pointing at
+  MCP tools.
+
 ## [0.31.0] - 2026-05-08
 
 **Hot memory ships. Your brain remembers what you said today, across sessions.**
