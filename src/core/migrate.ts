@@ -2167,6 +2167,38 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE pages ADD COLUMN IF NOT EXISTS emotional_weight_recomputed_at TIMESTAMPTZ;
     `,
   },
+  {
+    version: 45,
+    name: 'mcp_request_log_params_jsonb_normalize',
+    idempotent: true,
+    // v0.31 wave (D-codex-2 / D1): mcp_request_log.params is JSONB, but
+    // pre-v0.31 serve-http.ts wrote `JSON.stringify(...)` strings into it
+    // via the postgres.js template tag's loose typing. The column was
+    // technically JSONB but stored as a JSON-encoded string, so reads via
+    // `params->>'op'` returned the encoded string '"search"' instead of
+    // 'search'. The /admin/api/requests endpoint at serve-http.ts:605
+    // returned both shapes raw to the SPA depending on row age.
+    //
+    // The v0.31 commit re-routes those INSERTs through executeRawJsonb,
+    // which writes real objects. This one-shot UPDATE lifts existing
+    // string-shaped rows up to objects so the read side sees one
+    // consistent shape. Idempotent: subsequent runs find no rows where
+    // jsonb_typeof = 'string' and the UPDATE is a no-op.
+    //
+    // `params #>> '{}'` extracts the underlying string at the top level
+    // (works for any string-typed JSONB), then ::jsonb re-parses it as
+    // JSON. If a row was written with a non-JSON-parseable string (e.g.,
+    // `'"raw garbage"'::jsonb` — itself a JSON-string-of-anything), the
+    // re-parse keeps it as a string-typed JSONB rather than throwing,
+    // so the migration never aborts on weird rows. The `WHERE` filter
+    // guards against running on already-object rows.
+    sql: `
+      UPDATE mcp_request_log
+        SET params = (params #>> '{}')::jsonb
+        WHERE jsonb_typeof(params) = 'string'
+          AND params #>> '{}' LIKE '{%';
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

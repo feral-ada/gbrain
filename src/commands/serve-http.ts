@@ -32,6 +32,7 @@ import { loadConfig } from '../core/config.ts';
 import { buildError, serializeError } from '../core/errors.ts';
 import { VERSION } from '../version.ts';
 import * as db from '../core/db.ts';
+import { sqlQueryForEngine, executeRawJsonb } from '../core/sql-query.ts';
 
 /**
  * /health endpoint timeout. 3s rather than 5s: Fly.io's default
@@ -172,8 +173,12 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     );
   }
 
-  // Get raw SQL connection for OAuth provider
-  const sql = db.getConnection() as SqlQuery;
+  // Engine-aware SQL adapter. Routes through engine.executeRaw on both
+  // Postgres and PGLite — the OAuth/admin/auth surface no longer requires
+  // a postgres.js singleton, so `gbrain serve --http` works against PGLite
+  // brains too. The narrow SqlQuery contract is scalar-binds-only; JSONB
+  // writes use executeRawJsonb (see mcp_request_log INSERT sites below).
+  const sql = sqlQueryForEngine(engine);
 
   // Initialize OAuth provider. F12 cleanup: DCR-disable now flips a
   // constructor option instead of monkey-patching `_clientsStore` after
@@ -595,27 +600,44 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       const operation = req.query.operation as string;
       const status = req.query.status as string;
 
-      // Dynamic filtering via postgres.js tagged-template fragments.
-      // Each filter expands to either `AND col = $N` (parameterized) or
-      // an empty fragment. `WHERE 1=1` lets us always have a WHERE clause
-      // and unconditionally append AND-prefixed fragments — no string
-      // interpolation, no manual escaping, no sql.unsafe.
-      const agentFilter = agent && agent !== 'all' ? sql`AND token_name = ${agent}` : sql``;
-      const opFilter = operation && operation !== 'all' ? sql`AND operation = ${operation}` : sql``;
-      const statusFilter = status && status !== 'all' ? sql`AND status = ${status}` : sql``;
+      // Dynamic filtering: SqlQuery is deliberately scalar-only and does not
+      // support fragment composition (the prior `sql\`AND ... = ${v}\`` shape).
+      // Build the WHERE clause with positional placeholders + a params array.
+      // `WHERE 1=1` lets us always have a WHERE clause and conditionally
+      // append `AND col = $N` fragments — still parameterized, still escaped
+      // by the driver, no sql.unsafe.
+      const filters: string[] = [];
+      const params: (string | number)[] = [];
+      if (agent && agent !== 'all') {
+        filters.push(`AND token_name = $${params.length + 1}`);
+        params.push(agent);
+      }
+      if (operation && operation !== 'all') {
+        filters.push(`AND operation = $${params.length + 1}`);
+        params.push(operation);
+      }
+      if (status && status !== 'all') {
+        filters.push(`AND status = $${params.length + 1}`);
+        params.push(status);
+      }
+      const filterSql = filters.join(' ');
+      const limitParam = `$${params.length + 1}`;
+      const offsetParam = `$${params.length + 2}`;
 
-      const rows = await sql`
-        SELECT id, token_name, COALESCE(agent_name, token_name) as agent_name,
-               operation, latency_ms, status, params, error_message, created_at
-        FROM mcp_request_log
-        WHERE 1=1 ${agentFilter} ${opFilter} ${statusFilter}
-        ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}
-      `;
-      const [countResult] = await sql`
-        SELECT count(*)::int as total FROM mcp_request_log
-        WHERE 1=1 ${agentFilter} ${opFilter} ${statusFilter}
-      `;
-      res.json({ rows, total: (countResult as any).total, page, pages: Math.ceil((countResult as any).total / limit) });
+      const rows = await engine.executeRaw(
+        `SELECT id, token_name, COALESCE(agent_name, token_name) as agent_name,
+                operation, latency_ms, status, params, error_message, created_at
+         FROM mcp_request_log
+         WHERE 1=1 ${filterSql}
+         ORDER BY created_at DESC LIMIT ${limitParam} OFFSET ${offsetParam}`,
+        [...params, limit, offset],
+      );
+      const [countResult] = await engine.executeRaw<{ total: number }>(
+        `SELECT count(*)::int as total FROM mcp_request_log
+         WHERE 1=1 ${filterSql}`,
+        params,
+      );
+      res.json({ rows, total: countResult.total, page, pages: Math.ceil(countResult.total / limit) });
     } catch {
       res.status(503).json({ error: 'service_unavailable' });
     }
@@ -767,8 +789,13 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       // asserting >= 2 rows after tools/list + tools/call was unreachable.
       const latency = Date.now() - startTime;
       try {
-        await sql`INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, params)
-                  VALUES (${authInfo.clientId}, ${agentName}, ${'tools/list'}, ${latency}, ${'success'}, ${null})`;
+        await executeRawJsonb(
+          engine,
+          `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, params)
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+          [authInfo.clientId, agentName, 'tools/list', latency, 'success'],
+          [null],
+        );
       } catch { /* best effort */ }
       broadcastEvent({
         agent: agentName,
@@ -807,8 +834,13 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         // valid-op success/error.
         const latency = Date.now() - startTime;
         try {
-          await sql`INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, params, error_message)
-                    VALUES (${authInfo.clientId}, ${agentName}, ${name}, ${latency}, ${'error'}, ${null}, ${`unknown_operation: ${name}`})`;
+          await executeRawJsonb(
+            engine,
+            `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
+             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+            [authInfo.clientId, agentName, name, latency, 'error', `unknown_operation: ${name}`],
+            [null],
+          );
         } catch { /* best effort */ }
         broadcastEvent({
           agent: agentName,
@@ -834,8 +866,13 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         // persistence regression test reliable across both rejection paths.
         const latency = Date.now() - startTime;
         try {
-          await sql`INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, params, error_message)
-                    VALUES (${authInfo.clientId}, ${agentName}, ${name}, ${latency}, ${'error'}, ${null}, ${`insufficient_scope: requires '${requiredScope}'`})`;
+          await executeRawJsonb(
+            engine,
+            `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
+             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+            [authInfo.clientId, agentName, name, latency, 'error', `insufficient_scope: requires '${requiredScope}'`],
+            [null],
+          );
         } catch { /* best effort */ }
         broadcastEvent({
           agent: agentName,
@@ -883,10 +920,19 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       // never written to mcp_request_log or the SSE feed). --log-full-params
       // bypasses this for operators debugging on their own laptop, with the
       // startup warning printed earlier.
+      //
+      // D1 (v0.31 wave): mcp_request_log.params is JSONB. Pre-v0.31 wrote
+      // a JSON-string into that JSONB column via the postgres.js template
+      // tag's loose typing — readable but semantically wrong (params->>'op'
+      // would return the encoded string, not the value). Post-v0.31 we
+      // pass the OBJECT through executeRawJsonb with an explicit ::jsonb
+      // cast, so reads return real objects and `params->>'op'` returns
+      // 'tools/list'. Pre-existing string-shaped rows are normalized by
+      // migration v41 in src/core/migrate.ts.
       const safeParamsSummary = summarizeMcpParams(name, params);
-      const logParams = logFullParams
-        ? (params ? JSON.stringify(params) : null)
-        : (safeParamsSummary ? JSON.stringify(safeParamsSummary) : null);
+      const logParamsObj: unknown = logFullParams
+        ? (params || null)
+        : (safeParamsSummary || null);
       const broadcastParams = logFullParams ? (params || {}) : safeParamsSummary;
 
       try {
@@ -894,8 +940,13 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         const latency = Date.now() - startTime;
 
         try {
-          await sql`INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, params)
-                    VALUES (${authInfo.clientId}, ${agentName}, ${name}, ${latency}, ${'success'}, ${logParams})`;
+          await executeRawJsonb(
+            engine,
+            `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, params)
+             VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+            [authInfo.clientId, agentName, name, latency, 'success'],
+            [logParamsObj],
+          );
         } catch { /* best effort */ }
 
         broadcastEvent({
@@ -928,8 +979,13 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
           : serializeError(e);
         const errMsg = errorPayload.message;
         try {
-          await sql`INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, params, error_message)
-                    VALUES (${authInfo.clientId}, ${agentName}, ${name}, ${latency}, ${'error'}, ${logParams}, ${errMsg})`;
+          await executeRawJsonb(
+            engine,
+            `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
+             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+            [authInfo.clientId, agentName, name, latency, 'error', errMsg],
+            [logParamsObj],
+          );
         } catch { /* best effort */ }
 
         broadcastEvent({
