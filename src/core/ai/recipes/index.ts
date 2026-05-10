@@ -16,6 +16,7 @@ import { deepseek } from './deepseek.ts';
 import { groq } from './groq.ts';
 import { together } from './together.ts';
 import { llamaServer } from './llama-server.ts';
+import { minimax } from './minimax.ts';
 
 const ALL: Recipe[] = [
   openai,
@@ -28,6 +29,7 @@ const ALL: Recipe[] = [
   groq,
   together,
   llamaServer,
+  minimax,
 ];
 
 /** Map from `provider:id` key to recipe. */

@@ -58,6 +58,14 @@ export function dimsProviderOptions(
       if (VOYAGE_OUTPUT_DIMENSION_MODELS.has(modelId)) {
         return { openaiCompatible: { output_dimension: dims } };
       }
+      // MiniMax embo-01 takes a `type: 'db' | 'query'` field for asymmetric
+      // retrieval. Default to 'db' (the indexing path) so embed() works for
+      // import. Queries also embed with type:'db', making retrieval
+      // symmetric. Asymmetric query support is a follow-up TODO that needs
+      // a query/document signal threaded through the embed seam.
+      if (modelId === 'embo-01') {
+        return { openaiCompatible: { type: 'db' } };
+      }
       return undefined;
   }
 }
