@@ -72,6 +72,20 @@ export interface EmbeddingTouchpoint {
    * text embedding paths ignore it.
    */
   multimodal_models?: string[];
+  /**
+   * v0.32: when true, the recipe ships without a fixed model list and users
+   * MUST provide `--embedding-model provider:model` and
+   * `--embedding-dimensions N` explicitly. Used by litellm-proxy and
+   * llama-server (and any future "bring your own backend" recipe).
+   *
+   * Consumers:
+   *  - `recipes-contract.test.ts` permits `models.length === 0` only when
+   *    this flag is true.
+   *  - `gateway.ts` skips the model-list-must-include-modelId check.
+   *  - `init.ts:resolveAIOptions` refuses the implicit "first model" pick
+   *    for shorthand `--model <provider>` and prints a setup hint.
+   */
+  user_provided_models?: true;
 }
 
 /**
@@ -147,6 +161,39 @@ export interface Recipe {
   aliases?: Record<string, string>;
   /** One-line description of setup (shown in wizard + env subcommand). */
   setup_hint?: string;
+  /**
+   * v0.32 (D12=A): unified auth resolver across embed / expansion / chat
+   * touchpoints. Returns the header name (`Authorization`, `api-key`, etc.)
+   * and the full header value (for Bearer-style providers, include the
+   * `Bearer ` prefix). Throws AIConfigError when required env is missing
+   * with a hint pointing at the recipe's setup_url.
+   *
+   * When omitted, the gateway applies a default that returns
+   * `{headerName: 'Authorization', token: 'Bearer ' + env[auth_env.required[0]]}`.
+   * The default is the right behavior for OpenAI-compatible providers with a
+   * single API key. Recipes deviating (Azure uses `api-key`; future OAuth
+   * providers fetch dynamic tokens) override this.
+   *
+   * IMPORTANT: this runs at gateway-configure time (NOT at embed-call time)
+   * so the env snapshot in `cfg.env` is consulted, never `process.env`.
+   */
+  resolveAuth?(env: Record<string, string | undefined>): {
+    headerName: string;
+    token: string;
+  };
+  /**
+   * v0.32 (D13=A): optional runtime readiness check for local-server
+   * recipes (ollama, llama-server, future lmstudio-recipe). Returns
+   * `ready: false` when the local endpoint isn't reachable, with a `hint`
+   * the wizard / doctor can surface.
+   *
+   * Defaults to env-only readiness (`auth_env.required` all set) when
+   * absent. Consumed by `runExplain()` in `src/commands/providers.ts` and
+   * by the doctor's embedding probe; both wrap the call in
+   * `Promise.allSettled` with a 200ms timeout so a hung local server does
+   * not block the provider matrix.
+   */
+  probe?(): Promise<{ ready: boolean; hint?: string }>;
 }
 
 export interface AIGatewayConfig {
