@@ -11,7 +11,6 @@
 import { readFileSync, writeFileSync, renameSync, chmodSync, mkdtempSync, rmSync, existsSync, mkdirSync, appendFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
-import { gbrainPath } from './config.ts';
 
 function home(): string {
   // `os.homedir()` in Bun caches its initial value and ignores later
@@ -24,6 +23,26 @@ function home(): string {
   // honors GBRAIN_HOME), so this fallback is only used by code paths that
   // want $HOME directly (none in this file as of v0.30.3).
   return process.env.HOME || homedir();
+}
+
+/**
+ * GBRAIN_HOME-aware override for the .gbrain directory. When the env var
+ * is set, this returns it directly (so the directory is GBRAIN_HOME itself,
+ * matching the convention `src/core/config.ts:gbrainPath` enforces).
+ * When unset, falls back to `<home>/.gbrain` so legacy callers and the
+ * doctor's filesystem-only checks keep working.
+ *
+ * Without this, `~/.gbrain/migrations/completed.jsonl` is the only path
+ * doctor reads on filesystem checks — the test isolation contract that
+ * `gbrainPath()` provides for everywhere else doesn't extend here.
+ */
+function gbrainDir(): string {
+  const override = process.env.GBRAIN_HOME;
+  if (override) {
+    const trimmed = override.trim();
+    if (trimmed) return trimmed;
+  }
+  return join(home(), '.gbrain');
 }
 
 export type MinionMode = 'always' | 'pain_triggered' | 'off';
@@ -60,14 +79,14 @@ export interface CompletedMigrationEntry {
 
 const VALID_MODES: ReadonlyArray<MinionMode> = ['always', 'pain_triggered', 'off'];
 
-// Route preferences + migration ledger paths through gbrainPath() so they
-// honor GBRAIN_HOME for hermetic test isolation. Pre-v0.30.3, these used
+// Route preferences + migration ledger paths through gbrainDir() so they
+// honor GBRAIN_HOME for hermetic test isolation. Pre-v0.30.3 these used
 // `$HOME/.gbrain` directly, which leaked the developer's local migration
 // ledger into E2E tests and CI runs even when GBRAIN_HOME was set.
-function prefsDir(): string { return gbrainPath(); }
-function prefsPath(): string { return gbrainPath('preferences.json'); }
-function migrationsDir(): string { return gbrainPath('migrations'); }
-function completedJsonlPath(): string { return gbrainPath('migrations', 'completed.jsonl'); }
+function prefsDir(): string { return gbrainDir(); }
+function prefsPath(): string { return join(prefsDir(), 'preferences.json'); }
+function migrationsDir(): string { return join(gbrainDir(), 'migrations'); }
+function completedJsonlPath(): string { return join(migrationsDir(), 'completed.jsonl'); }
 
 /** Validate that a value is a recognized minion mode. Throws with the allowed list. */
 export function validateMinionMode(value: unknown): asserts value is MinionMode {

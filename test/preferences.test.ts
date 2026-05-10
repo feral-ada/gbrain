@@ -21,12 +21,12 @@ beforeEach(() => {
   origHome = process.env.HOME;
   origGbrainHome = process.env.GBRAIN_HOME;
   tmp = mkdtempSync(join(tmpdir(), 'gbrain-prefs-test-'));
-  // v0.30.3: preferences + completed.jsonl now route through gbrainPath()
-  // which honors GBRAIN_HOME. Set both so the test body works against any
-  // future homedir() refactor and so subprocess shells (if any) also land
-  // in the same hermetic dir.
+  // preferences.ts's gbrainDir() returns `$HOME/.gbrain` when GBRAIN_HOME
+  // is unset. Test fixtures write to `$tmp/.gbrain/...`, so set HOME only
+  // and clear GBRAIN_HOME — setting GBRAIN_HOME would route prefs to $tmp
+  // directly (no .gbrain suffix), which doesn't match the fixture layout.
   process.env.HOME = tmp;
-  process.env.GBRAIN_HOME = tmp;
+  delete process.env.GBRAIN_HOME;
 });
 
 afterEach(() => {

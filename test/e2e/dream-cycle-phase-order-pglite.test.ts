@@ -86,10 +86,16 @@ async function withoutAnthropicKey<T>(body: () => Promise<T>): Promise<T> {
   }
 }
 
-// v0.30.3: phase set has grown from v0.23's 8 phases. The order below is
+// v0.31: phase set has grown from v0.23's 8 phases. The order below is
 // the canonical sequence enforced by ALL_PHASES in src/core/cycle.ts.
 // Maintenance contract: when a future migration adds or removes a phase,
 // extend this constant AND update both assertions below.
+//
+// Phase history:
+//   v0.23   — 8 phases (lint → ... → orphans)
+//   v0.26.5 — added `purge` (last)
+//   v0.29   — added `recompute_emotional_weight` between patterns and embed
+//   v0.31   — added `consolidate` between recompute_emotional_weight and embed
 type CyclePhase = (typeof ALL_PHASES)[number];
 const EXPECTED_PHASES: CyclePhase[] = [
   'lint',
@@ -99,9 +105,10 @@ const EXPECTED_PHASES: CyclePhase[] = [
   'extract',
   'patterns',
   'recompute_emotional_weight', // v0.29
+  'consolidate',                // v0.31
   'embed',
   'orphans',
-  'purge', // v0.26.5
+  'purge',                       // v0.26.5
 ];
 
 describe('E2E full cycle phase order', () => {
@@ -120,11 +127,15 @@ describe('E2E full cycle phase order', () => {
         // Phase ordering preserved across releases
         const phaseNames = report.phases.map(p => p.phase);
         expect(phaseNames).toEqual(EXPECTED_PHASES);
-        // v0.23 additive totals fields still present
+        // Additive totals fields across v0.23, v0.26.5, v0.31 all present
         expect(report.totals).toMatchObject({
           transcripts_processed: 0,
           synth_pages_written: 0,
           patterns_written: 0,
+          purged_sources_count: 0,
+          purged_pages_count: 0,
+          facts_consolidated: 0,
+          consolidate_takes_written: 0,
         });
         // Synthesize and patterns are skipped (not_configured / insufficient_evidence)
         const synth = report.phases.find(p => p.phase === 'synthesize');

@@ -22,11 +22,11 @@ const originalGbrainHome = process.env.GBRAIN_HOME;
 
 beforeEach(() => {
   tmpHome = mkdtempSync(join(tmpdir(), 'gbrain-migration-resume-'));
-  // v0.30.3: appendCompletedMigration / loadCompletedMigrations route
-  // through gbrainPath() which honors GBRAIN_HOME. Set both so the test
-  // body works whether preferences read $HOME or GBRAIN_HOME.
+  // preferences.ts's gbrainDir() returns `$HOME/.gbrain` when GBRAIN_HOME
+  // is unset. Set HOME only; clear any inherited GBRAIN_HOME so the test
+  // body matches the migrations dir at `$tmpHome/.gbrain/migrations/`.
   process.env.HOME = tmpHome;
-  process.env.GBRAIN_HOME = tmpHome;
+  delete process.env.GBRAIN_HOME;
 });
 
 afterEach(() => {

@@ -62,13 +62,12 @@ if (!SKIP) {
 
 function freshTempHome(label: string) {
   const dir = mkdtempSync(join(tmpdir(), `gbrain-e2e-migration-${label}-`));
-  // v0.30.3: preferences + completed.jsonl now route through gbrainPath()
-  // which honors GBRAIN_HOME (was: $HOME-only). Set both so the same test
-  // body works against pre-v0.30.3 and current source — and so other env
-  // readers that still use $HOME (e.g., shell-spawned subprocesses that
-  // cd into ~) land in the same hermetic dir.
+  // preferences.ts's gbrainDir() returns `$HOME/.gbrain` when GBRAIN_HOME
+  // is unset. Test fixtures write to `$dir/.gbrain/...`, so set HOME only
+  // and clear any inherited GBRAIN_HOME (which would route prefs to $dir
+  // directly, no .gbrain suffix).
   process.env.HOME = dir;
-  process.env.GBRAIN_HOME = dir;
+  delete process.env.GBRAIN_HOME;
   // Seed config so Phase A's `gbrain init --migrate-only` has a target.
   mkdirSync(join(dir, '.gbrain'), { recursive: true });
   writeFileSync(
