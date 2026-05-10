@@ -138,17 +138,25 @@ describe('check-resolvable — unit: resolveSkillsDir', () => {
     expect(r.source).toBe('explicit');
   });
 
-  it('REGRESSION-GATE: returns no_skills_dir error when no --skills-dir and findRepoRoot fails', () => {
-    // Temporarily chdir to a guaranteed-empty tmpdir. findRepoRoot will walk
-    // up and fail to find skills/RESOLVER.md.
+  it('v0.31.7: empty cwd falls back to install-path (finds bundled skills/)', () => {
+    // Temporarily chdir to a guaranteed-empty tmpdir. findRepoRoot from cwd
+    // walks up and fails — but autoDetectSkillsDirReadOnly's tier-5
+    // install-path fallback then walks up from the gbrain module's own
+    // location and finds the bundled skills/ dir. This is the v0.31.7
+    // capability: doctor and check-resolvable work from anywhere.
+    //
+    // To test the underlying no_skills_dir error path, see the unit tests
+    // in test/repo-root.test.ts that drive autoDetectSkillsDirReadOnly
+    // with mocked env to suppress the install-path success.
     const empty = mkdtempSync(join(tmpdir(), 'empty-for-resolve-'));
     const original = process.cwd();
     try {
       process.chdir(empty);
       const r = resolveSkillsDir({ help: false, json: false, fix: false, dryRun: false, verbose: false, strict: false, skillsDir: null });
-      expect(r.error).toBe('no_skills_dir');
-      expect(r.dir).toBeNull();
-      expect(typeof r.message).toBe('string');
+      // Install-path fallback succeeds when test runs inside the gbrain repo.
+      expect(r.error).toBeNull();
+      expect(r.dir).toMatch(/\/skills$/);
+      expect(r.source).toBe('install_path');
     } finally {
       process.chdir(original);
       rmSync(empty, { recursive: true, force: true });
