@@ -2,6 +2,78 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.31.7] - 2026-05-09
+
+**`gbrain doctor` stops crying wolf, period — and finds itself on every deployment shape. Five community PRs land one cohesive narrative: every false-positive class on disk today, plus the install-path footgun that bit every hosted-CLI user who ever ran `gbrain doctor` from `~`.**
+
+When the doctor cries wolf, agents and humans learn to ignore it, which then masks the real problems. The previous wave (v0.31.1.1-fixwave) sharpened real signal with `sync_failures` code classification. This wave fixes the inverse: every false-positive class on disk today gets honest. Five PRs, four contributors, one theme.
+
+### The numbers that matter
+
+Verified against a live OpenClaw deployment with 224 skills, `skills/RESOLVER.md` (41 entries from skillpack), and `../AGENTS.md` (206 entries); plus a markdown-only journal brain (2533 pages, 0 entity pages); plus the v0.25.1 wave skills' routing-eval suite; plus a hosted-CLI install:
+
+| | Before | After |
+|---|---|---|
+| OpenClaw reachable skills | 37/224 | **200/224** |
+| v0.25.1 skill routing accuracy | 36 ambiguous matches | **0** |
+| Markdown-only brain `graph_coverage` | warn forever | **OK** |
+| Stale `gbrain link-extract` hint (since v0.16) | suggested in WARN | **`gbrain extract all`** |
+| Hosted-CLI doctor from `~` | "Could not find skills directory" | **finds bundled `skills/`** |
+| Health score on healthy OpenClaw + journal brains | 40/100 | **100/100** |
+
+The remaining unreachable skills, low-coverage warnings, and any future doctor warns are real gaps: new skills without trigger rows, brains with actual coverage shortfalls, fixes you actually want to see.
+
+### What you can now do
+
+**`gbrain doctor` is honest about resolver health on OpenClaw deployments.** OpenClaw workspaces typically have a thin `skills/RESOLVER.md` (~40 entries from the skillpack) and a fat `AGENTS.md` at the workspace root (200+ entries, the real dispatcher). The previous first-match-wins policy only saw `RESOLVER.md`, so the doctor reported 187 skills as "unreachable" when they were fully routed in `AGENTS.md`. Now `check-resolvable` collects entries from every resolver file across both the skills directory and its parent, deduped by `skillPath`. New helper `findAllResolverFiles()` returns every match instead of the first. ([#798](https://github.com/garrytan/gbrain/pull/798))
+
+**Routing accuracy on the v0.25.1 wave skills lifts from "36 ambiguous warnings" to zero.** Each skill's `triggers:` frontmatter declares 4-5 entries, but only the first ever made it into the matching RESOLVER.md row, so the structural matcher couldn't find a specific phrase for realistic user intents. RESOLVER.md is now synced with the full frontmatter triggers across book-mirror, article-enrichment, strategic-reading, concept-synthesis, perplexity-research, archive-crawler, academic-verify, brain-pdf, voice-note-ingest, and media-ingest. Plus targeted `ambiguous_with` fixture annotations where chains like `enrich → article-enrichment` are designed to co-fire. Contributed by [@psperera](https://github.com/psperera). ([#788](https://github.com/garrytan/gbrain/pull/788))
+
+**Markdown-only brains pass `graph_coverage` instead of warning at 0% forever.** The check measures `link_coverage` and `timeline_coverage` over entity pages. For wikis, journals, and notes brains (Karpathy's original LLM Wiki use case), entity count is 0, so coverage is structurally undefined. The doctor now detects this and reports `ok: no entity pages — graph_coverage not applicable`. Verified on a 2533-page production wiki with 6086 wikilinks, 1964 timeline entries, zero entity pages. Contributed by [@mayazbay](https://github.com/mayazbay). ([#536](https://github.com/garrytan/gbrain/pull/536), closes #530)
+
+**The `graph_coverage` hint stops suggesting commands that haven't existed since v0.16.** The hint pointed at `gbrain link-extract && gbrain timeline-extract` (consolidated into `gbrain extract <links|timeline|all>` 30 releases ago). Now says `gbrain extract all`. Header comment in `src/core/link-extraction.ts` updated to match. Pinned by an IRON-RULE regression test that bans the stale verb names from the source string. Originally raised by [@FUSED-ID](https://github.com/FUSED-ID). ([#376](https://github.com/garrytan/gbrain/pull/376), folded into the wave's clean shape)
+
+**`gbrain doctor` works from anywhere.** On `bun install -g github:garrytan/gbrain && cd ~ && gbrain doctor`, the doctor used to warn "Could not find skills directory" and dock the health score forever — every hosted-CLI user took a permanent `-5`. The bundled `skills/` lives under `node_modules/gbrain/`; the cwd-only walk never looked there. Now there's a tier-0 `$GBRAIN_SKILLS_DIR` operator override (Docker mounts, CI, monorepo subdirs) plus a read-only install-path fallback that walks up from the gbrain module's own location. Doctor / check-resolvable / routing-eval get the install-path fallback; write-path callers (skillpack install, skillify scaffold) deliberately do NOT — the architectural split prevents `gbrain skillpack install` from `~` silently retargeting the bundled gbrain repo's skills/ instead of the user's actual workspace. Originally raised by [@TheAndersMadsen](https://github.com/TheAndersMadsen) ([#128](https://github.com/garrytan/gbrain/pull/128)); adapted into the existing 5-tier resolver after eng + outside-voice review.
+
+### To take advantage of v0.31.7
+
+```bash
+gbrain upgrade
+gbrain doctor
+```
+
+After upgrade, anything that was `[WARN] graph_coverage` or `[WARN] resolver_health` on a healthy brain should now be `[OK]`. Real warnings remain real. The `[WARN]` lines you see are the ones worth acting on — file an issue at https://github.com/garrytan/gbrain/issues with `gbrain doctor --json` output if anything looks off.
+
+### Itemized changes
+
+#### Resolver merge across multiple files
+- `src/core/resolver-filenames.ts`: add `findAllResolverFiles(dir)` returning every recognized resolver file in `dir`. `findResolverFile()` unchanged (backward-compatible).
+- `src/core/check-resolvable.ts`: replace single-file lookup with multi-file merge across skills dir + parent. Entries deduped by `skillPath`. Combined `resolverContent` passed to routing-eval. Error message switches from hardcoded "RESOLVER.md" to `RESOLVER_FILENAMES_LABEL`.
+- `test/resolver-merge.test.ts`: 8 new cases covering `findAllResolverFiles` behavior and the merge path in `checkResolvable`.
+
+#### RESOLVER.md trigger sync (v0.25.1 wave)
+- `skills/RESOLVER.md`: 9 hand-curated rows expanded to include the full frontmatter triggers per skill. media-ingest's prose row converted to quoted triggers so the matcher actually sees them; `"PDF book"` and `"ingest it into my brain"` carried over from HEAD's richer frontmatter.
+- `skills/article-enrichment/routing-eval.jsonl`: `ambiguous_with: ["enrich"]` added to all 5 fixtures (acknowledges the resolver doc's framing that skills chain).
+
+#### graph_coverage zero-entity short-circuit + verb fix
+- `src/commands/doctor.ts`: detect entity-page count via SQL; mark check `ok` when 0 entity pages. Hint updated to `gbrain extract all`.
+- `src/core/link-extraction.ts`: header comment updated to reference the consolidated `extract.ts`.
+- `test/doctor.test.ts`: IRON-RULE regression assertion bans `gbrain link-extract` / `gbrain timeline-extract` from the source string.
+
+#### Install-path resolver (read-path-only)
+- `src/core/repo-root.ts`: tier-0 `$GBRAIN_SKILLS_DIR` explicit override on shared `autoDetectSkillsDir`. New exported `autoDetectSkillsDirReadOnly` wraps it with install-path fallback gated by `isGbrainRepoRoot`. Two new `SkillsDirSource` variants: `'env_explicit'`, `'install_path'`. New `AUTO_DETECT_HINT_READ_ONLY` constant.
+- Read-path callers switched to `autoDetectSkillsDirReadOnly`: `src/commands/doctor.ts`, `src/commands/check-resolvable.ts`, `src/commands/routing-eval.ts`.
+- Write-path callers stay on `autoDetectSkillsDir`: `src/commands/skillpack.ts`, `src/commands/skillify.ts`, `src/core/skillpack/post-install-advisory.ts`. The split prevents silent workspace retargeting on `gbrain skillpack install` from `~`.
+- `test/repo-root.test.ts`: 8 new cases covering tier-0 valid/invalid/precedence, install-path walk, no-drift on primary success, AUTO_DETECT_HINT updates, and the D5 regression guard that pins the read-path/write-path split (asserts the shared resolver MUST NEVER return `'install_path'` source).
+
+### For contributors
+
+- New `SkillsDirSource` variants `'env_explicit'` and `'install_path'` — downstream consumers using the type union should add cases (TypeScript exhaustiveness will flag missing handlers).
+- The architectural split between `autoDetectSkillsDir` (read+write-safe) and `autoDetectSkillsDirReadOnly` (read-only with install-path fallback) is the canonical pattern for any future "fall back further when nothing else worked" addition. New consumers default to the safer (write-safe) variant; opt into the read-only variant with intent.
+- Contributors: [@mayazbay](https://github.com/mayazbay), [@psperera](https://github.com/psperera), [@FUSED-ID](https://github.com/FUSED-ID), [@TheAndersMadsen](https://github.com/TheAndersMadsen). Outside-voice plan review (codex) caught the read-path/write-path split risk before code landed.
+
+[#798](https://github.com/garrytan/gbrain/pull/798) [#788](https://github.com/garrytan/gbrain/pull/788) [#536](https://github.com/garrytan/gbrain/pull/536) [#376](https://github.com/garrytan/gbrain/pull/376) [#128](https://github.com/garrytan/gbrain/pull/128)
+
 ## [0.31.1.1-fixwave] - 2026-05-09
 
 **Security upgrade priority: closes an authorization-code scope-escalation in `gbrain serve --http`. Plus 18 community fix-wave PRs covering upgrade-path correctness, multi-source sync, takes-fence privacy, dream cycle reliability, and CLI hygiene.**
