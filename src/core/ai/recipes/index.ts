@@ -18,6 +18,7 @@ import { together } from './together.ts';
 import { llamaServer } from './llama-server.ts';
 import { minimax } from './minimax.ts';
 import { dashscope } from './dashscope.ts';
+import { zhipu } from './zhipu.ts';
 
 const ALL: Recipe[] = [
   openai,
@@ -32,6 +33,7 @@ const ALL: Recipe[] = [
   llamaServer,
   minimax,
   dashscope,
+  zhipu,
 ];
 
 /** Map from `provider:id` key to recipe. */
