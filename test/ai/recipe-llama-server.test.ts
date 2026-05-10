@@ -12,21 +12,12 @@
  *  - default auth resolves to "Bearer unauthenticated" (or the API key if set)
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import { getRecipe } from '../../src/core/ai/recipes/index.ts';
 import { defaultResolveAuth } from '../../src/core/ai/gateway.ts';
+import { withEnv } from '../helpers/with-env.ts';
 
 describe('recipe: llama-server', () => {
-  let savedBaseUrl: string | undefined;
-  beforeEach(() => {
-    savedBaseUrl = process.env.LLAMA_SERVER_BASE_URL;
-    delete process.env.LLAMA_SERVER_BASE_URL;
-  });
-  afterEach(() => {
-    if (savedBaseUrl !== undefined) process.env.LLAMA_SERVER_BASE_URL = savedBaseUrl;
-    else delete process.env.LLAMA_SERVER_BASE_URL;
-  });
-
   test('registered with expected shape', () => {
     const r = getRecipe('llama-server');
     expect(r).toBeDefined();
@@ -53,13 +44,16 @@ describe('recipe: llama-server', () => {
   });
 
   test('probe returns ready=false with hint when no server listening on default port', async () => {
-    // Use a guaranteed-unreachable port.
-    process.env.LLAMA_SERVER_BASE_URL = 'http://127.0.0.1:1/v1';
-    const r = getRecipe('llama-server')!;
-    const result = await r.probe!();
-    expect(result.ready).toBe(false);
-    expect(result.hint).toBeDefined();
-    expect(result.hint!.toLowerCase()).toContain('llama-server');
+    // Use a guaranteed-unreachable port. withEnv ensures the prior value
+    // (if any) is restored after the test, including across the
+    // shared-process parallel test runner.
+    await withEnv({ LLAMA_SERVER_BASE_URL: 'http://127.0.0.1:1/v1' }, async () => {
+      const r = getRecipe('llama-server')!;
+      const result = await r.probe!();
+      expect(result.ready).toBe(false);
+      expect(result.hint).toBeDefined();
+      expect(result.hint!.toLowerCase()).toContain('llama-server');
+    });
   });
 
   test('default auth: no env → "Bearer unauthenticated"', () => {
