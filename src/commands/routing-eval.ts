@@ -26,7 +26,7 @@ import {
   type FixtureLintIssue,
 } from '../core/routing-eval.ts';
 import { findResolverFile, RESOLVER_FILENAMES_LABEL } from '../core/resolver-filenames.ts';
-import { autoDetectSkillsDir } from '../core/repo-root.ts';
+import { autoDetectSkillsDirReadOnly } from '../core/repo-root.ts';
 import { join } from 'path';
 
 interface Flags {
@@ -93,7 +93,7 @@ function resolveSkillsDir(
       : resolvePath(process.cwd(), flags.skillsDir);
     return { dir, source: 'explicit', error: null, message: null };
   }
-  const detected = autoDetectSkillsDir();
+  const detected = autoDetectSkillsDirReadOnly();
   if (!detected.dir) {
     return {
       dir: null,

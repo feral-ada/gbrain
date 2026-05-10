@@ -23,7 +23,7 @@ import {
   type ResolvableIssue,
   type AutoFixReport,
 } from '../core/check-resolvable.ts';
-import { autoDetectSkillsDir, AUTO_DETECT_HINT, type SkillsDirSource } from '../core/repo-root.ts';
+import { autoDetectSkillsDirReadOnly, AUTO_DETECT_HINT_READ_ONLY, type SkillsDirSource } from '../core/repo-root.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -142,7 +142,7 @@ export function resolveSkillsDir(flags: Flags): {
     return { dir, error: null, message: null, source: 'explicit' };
   }
 
-  const detected = autoDetectSkillsDir();
+  const detected = autoDetectSkillsDirReadOnly();
   if (!detected.dir) {
     return {
       dir: null,
@@ -150,19 +150,21 @@ export function resolveSkillsDir(flags: Flags): {
       message:
         'Could not auto-detect skills/ with a RESOLVER.md or AGENTS.md.\n' +
         'Priority order:\n' +
-        AUTO_DETECT_HINT +
-        '\nFix: export OPENCLAW_WORKSPACE=<path> or pass --skills-dir <path>.',
+        AUTO_DETECT_HINT_READ_ONLY +
+        '\nFix: export GBRAIN_SKILLS_DIR=<path>, OPENCLAW_WORKSPACE=<path>, or pass --skills-dir <path>.',
       source: null,
     };
   }
 
   const sourceLabel = {
+    env_explicit: '$GBRAIN_SKILLS_DIR (explicit operator override)',
     repo_root: 'repo root skills/',
     openclaw_workspace_env: '$OPENCLAW_WORKSPACE/skills',
     openclaw_workspace_env_root: '$OPENCLAW_WORKSPACE (AGENTS.md at workspace root)',
     openclaw_workspace_home: '~/.openclaw/workspace/skills',
     openclaw_workspace_home_root: '~/.openclaw/workspace (AGENTS.md at workspace root)',
     cwd_skills: './skills',
+    install_path: 'gbrain install path (read-only fallback)',
   }[detected.source!]!;
 
   return {

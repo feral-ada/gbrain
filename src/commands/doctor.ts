@@ -3,7 +3,7 @@ import * as db from '../core/db.ts';
 import { LATEST_VERSION, getIdleBlockers } from '../core/migrate.ts';
 import { checkResolvable } from '../core/check-resolvable.ts';
 import { autoFixDryViolations, type AutoFixReport, type FixOutcome } from '../core/dry-fix.ts';
-import { autoDetectSkillsDir } from '../core/repo-root.ts';
+import { autoDetectSkillsDirReadOnly } from '../core/repo-root.ts';
 import { loadCompletedMigrations } from '../core/preferences.ts';
 import { compareVersions } from './migrations/index.ts';
 import { createProgress, startHeartbeat, type ProgressReporter } from '../core/progress.ts';
@@ -231,7 +231,10 @@ export async function runDoctor(engine: BrainEngine | null, args: string[], dbSo
   // Use the same auto-detect as `check-resolvable` so doctor sees a
   // workspace/skills dir reachable via $OPENCLAW_WORKSPACE or
   // ~/.openclaw/workspace, not just a `skills/` walked up from cwd.
-  const detected = autoDetectSkillsDir();
+  // Read-only variant adds the install-path fallback so a hosted-CLI install
+  // run from `~` (e.g., `bun install -g github:garrytan/gbrain && cd ~ &&
+  // gbrain doctor`) can still find the bundled skills/ dir without warning.
+  const detected = autoDetectSkillsDirReadOnly();
   const skillsDir = detected.dir;
   if (skillsDir) {
 
