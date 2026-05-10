@@ -513,7 +513,7 @@ Five tiers of test commands, each with a clear scope:
 
 ### CI vs local: intentionally divergent file sets
 
-- **CI matrix** (`.github/workflows/test.yml`) runs `scripts/test-shard.sh` 4-way, which uses FNV-1a hash bucketing and INCLUDES `*.slow.test.ts`. CI is the ground truth for "did everything pass."
+- **CI matrix** (`.github/workflows/test.yml`) runs `scripts/test-shard.sh` 4-way, which uses FNV-1a hash bucketing and INCLUDES `*.slow.test.ts`. As of v0.31.4.1, CI EXCLUDES `*.serial.test.ts` from the hash buckets and runs them on shard 1 via `bun run test:serial` at `--max-concurrency=1`. Before that, serial files were hashed in alongside parallel files, which broke the `mock.module` quarantine (top-level mocks in serial files leaked into the parallel files they shared a shard process with — most visibly, `eval-takes-quality-runner.serial.test.ts` stubbed `gateway.ts` and broke every `gateway.embedMultimodal` test in `voyage-multimodal.test.ts` on shard 2). CI is the ground truth for "did everything pass."
 - **Local fast loop** (`scripts/run-unit-shard.sh` via the parallel wrapper) uses round-robin-by-index sharding and EXCLUDES `*.slow.test.ts` AND `*.serial.test.ts`. Local trades coverage for inner-loop speed; CI catches what local skips.
 
 This divergence is intentional. Don't try to make them equal — the two scripts deliberately solve different problems. The regression test at `test/scripts/run-unit-shard.test.ts` pins what the local fast loop should and shouldn't include.
