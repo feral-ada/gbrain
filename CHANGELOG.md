@@ -118,6 +118,115 @@ Reworked from / inspired by:
 
 Codex outside-voice review during plan-eng-review drove the scope reduction (D11=C) from 8 recipes + OAuth subsystem to 5 recipes + docs.
 
+## [0.31.11] - 2026-05-10
+
+**Thin-client gbrain notices when the remote brain has upgraded and offers to bring you along.**
+
+If you're running `gbrain` against a remote `gbrain serve --http` host (the thin-client install from v0.31.1), each command now compares your local CLI version against the remote brain. When the remote has a newer minor or major release, you get a one-line prompt: `Upgrade local CLI now? [Y/n]`. Press Enter, the upgrade runs, the binary advances, your command re-prompts you to retype. Patch drift stays silent. Sticky decline per remote+version so you don't get re-asked every command after saying no. `gbrain remote doctor` surfaces the same drift as a warn-level check for quiet operators and CI.
+
+### What you can now do
+
+**Stop running stale binaries against a fresh brain.** Before this release, a thin-client install at v0.31.4 talking to a v0.32.0 brain would silently use the older protocol surface until the user noticed something was broken. The drift was invisible. Now the banner that already prints `[thin-client → host · brain: ... · v0.32.0]` follows up with an interactive upgrade prompt when local lags remote.
+
+**Decline once, stay declined.** If you press `n`, the prompt remembers your answer for that exact remote+version combination in `~/.gbrain/upgrade-prompt-state.json`. Subsequent commands are silent. When the remote bumps again, you get fresh prompts because the version key changed. Independent answers per remote brain (`work` vs `home`) via mcp_url-scoped state.
+
+**See drift in `gbrain remote doctor` even in non-TTY contexts.** The new `thin_client_upgrade_drift` check fires `warn` when minor/major drift is detected, with a fix hint pointing at `gbrain upgrade`. If a prior in-process upgrade attempt failed (state file shows `last_response: failed` for the same remote version), the hint pivots to the manual install URL so you don't loop on a broken binary.
+
+**Concurrent OpenClaw subagents don't fight over the TTY.** One advisory lockfile (`~/.gbrain/upgrade-prompt.lock`) gates the prompt. If two subagents both detect drift at the same instant, one prompts and the rest silently no-op. Stale-lock reclaim after 60s handles the case where a prompting process died mid-question.
+
+**Ctrl-C escapes the prompt cleanly.** A prompt-scoped SIGINT handler installs around the read and removes after, so pressing Ctrl-C exits 130 (the standard `network/aborted` code) instead of being swallowed by the outer dispatcher's AbortController-only handler.
+
+### Numbers that matter
+
+| Failure mode | Before v0.31.11 | After v0.31.11 |
+|---|---|---|
+| Local v0.31.4, remote v0.32.0 (minor drift) | No signal; user runs stale CLI until something breaks | Banner + interactive prompt; one Enter to upgrade |
+| User declines, runs `gbrain query` again | Re-prompted on every command | Sticky decline per (mcp_url, remote_version) |
+| `gbrain upgrade` runs but doesn't advance the binary (catch-and-print path) | Silent loop on broken binary | State=failed, exit 1, doctor hint pivots to manual install URL |
+| Two OpenClaw subagents both detect drift | Interleaved prompts on same TTY, both read each other's keystrokes | One prompts, others no-op via advisory lockfile |
+| Quiet/non-TTY/CI run with drift | No signal | `gbrain remote doctor` warns with fix hint |
+| Ctrl-C during the prompt | Swallowed (outer SIGINT handler installed already) | Exits 130 cleanly |
+| Stdin EOF mid-prompt (terminal closes, /dev/null piped past TTY check) | Hangs forever on `stdin.once('data')` | Resolves to null after 5min timeout; orchestrator treats as silent decline, no state write |
+
+### What this means for your workflow
+
+If you've been running `gbrain init --mcp-only` thin-client installs across a few machines, this closes the last "why is my brain confused?" failure mode: the answer was always "your local CLI is six releases behind the brain." Now the CLI tells you. The prompt fires at most once per command per (remote, version) and stays out of the way for quiet/non-TTY runs. CI sees the drift in `gbrain remote doctor`.
+
+## To take advantage of v0.31.11
+
+`gbrain upgrade` should land this automatically. If you're already on v0.31.11 the first time a remote brain you talk to bumps past you, you'll see the prompt. Nothing to configure.
+
+1. **Verify the doctor check is wired:**
+   ```bash
+   gbrain remote doctor --json | jq '.checks[] | select(.name == "thin_client_upgrade_drift")'
+   ```
+   You should see either `status: "ok"` (local equals remote) or `status: "warn"` (drift detected, fix hint included).
+
+2. **State file lives at `~/.gbrain/upgrade-prompt-state.json`.** It's keyed by mcp_url so multiple remote brains have isolated decline history. Delete the file to reset all answers.
+
+3. **Lockfile lives at `~/.gbrain/upgrade-prompt.lock`.** If a prompt died without cleaning up, the next invocation reclaims after 60s of stale mtime.
+
+4. **If any step fails or the prompt fires when it shouldn't,** please file an issue:
+   https://github.com/garrytan/gbrain/issues with the output of `gbrain remote doctor --json` and the contents of `~/.gbrain/upgrade-prompt-state.json` if it exists.
+
+### Itemized changes
+
+#### Added
+- `src/core/thin-client-upgrade-prompt.ts` — `maybePromptForUpgrade` orchestrator with full DI seams for tests. Lockfile gating (`acquirePromptLock` with stale-reclaim >60s mtime), atomic state-file IO via tmp+rename, per-entry shape validator that drops malformed entries while preserving valid siblings. Pure `decideAction` returns `prompt` or `noop` based on TTY gates, banner-suppressed, sticky decline, sticky yes, prior-failed re-prompt, and the D8 patch-drift-silent rule. `verifyUpgradeAdvanced` (D5) re-reads `gbrain --version` from a fresh subprocess to detect catch-and-print upgrade paths that return 0 without advancing the binary. Prompt-scoped SIGINT handler exits 130 cleanly.
+- `src/core/cli-util.ts` — `promptLineStderr(prompt, {timeoutMs})` sibling to `promptLine`. Resolves to `string` on stdin data, `null` on stdin EOF or after the 5-minute default timeout. Never rejects. Listener cleanup is idempotent via a `settled` guard.
+- `src/core/doctor-remote.ts` — `runUpgradeDriftCheck(config)` new check `thin_client_upgrade_drift`. Returns ok+inconclusive on network error (informational; the earlier `mcp_smoke` check covers the genuinely-unreachable case). Returns ok on local≥remote OR patch drift. Returns warn on minor/major drift with a fix hint that pivots to the manual install URL if a prior `gbrain upgrade` is recorded as `failed` for the same remote version.
+- `src/cli.ts` — exported `bannerSuppressed` + `BrainIdentity`; wired `maybePromptForUpgrade` into both banner code paths (cache hit and cache miss). Banner-suppressed early return guarantees `bannerIsSuppressed=false` at the call site.
+
+#### Changed
+- `PromptReader` type now returns `Promise<string | null>` to accommodate EOF/timeout. Orchestrator handles null as silent decline with no state write (a transient stdin closure must not poison the per-version sticky-decline gate).
+
+#### Tests
+- 63 new tests across `test/thin-client-upgrade-prompt.test.ts` (50 cases: safeCompare, driftLevel, state-file IO including atomic-write and corrupt-JSON fallthrough, every decision-matrix row, lockfile acquire/EEXIST/stale-reclaim, orchestrator yes/no/advanced/not-advanced/threw/null-from-EOF, SIGINT install/remove lifecycle including cleanup-on-throw, malformed-entry filtering preserves valid siblings, empty-key dropped) and `test/doctor-remote.test.ts` (5 new cases for `runUpgradeDriftCheck`: unreachable host returns ok+inconclusive, major drift no prior state shows auto-upgrade hint, major drift with prior_failed shows manual install hint, prior_failed for older version does NOT pivot stale, local equals remote returns ok). 100% pass.
+- Test fixture in `test/doctor-remote.test.ts` extended to dispatch JSON-RPC `tools/call` by tool name via per-test `mcpToolResults` map.
+
+#### For contributors
+- The `_setVerifierForTest`, `_setPromptReaderForTest`, `_setUpgradeRunnerForTest` injection seams in `thin-client-upgrade-prompt.ts` follow the same pattern as `_clearIdentityCacheForTest` in `src/cli.ts` so tests can drive the orchestrator end-to-end without spawning subprocesses or touching the user's PATH.
+
+## [0.31.10] - 2026-05-10
+
+**Setup hands you a real bootstrap, not an empty brain. New `cold-start` skill sequences day-1 imports across markdown, contacts, calendar, email, conversations, X, archives, and meeting transcripts. New `ask-user` choice-gate pattern. Phase J in `setup` auto-launches cold-start when verification passes.**
+
+The setup skill has always ended with a working brain that's empty, leaving every new user asking "now what?" v0.31.10 closes that gap. After `gbrain doctor` confirms a healthy install, the agent now offers to populate the brain through a priority-ranked sequence of data sources, gated on user consent at every phase. Each phase delegates to existing recipes (`email-to-brain.md`, `calendar-to-brain.md`, `x-to-brain.md`) and skills (`meeting-ingestion`); cold-start is orchestration, not reimplementation. Resume state at `~/.gbrain/cold-start-state.json` matches the existing `update-state.json` convention.
+
+### What you can now do
+
+**Bootstrap a brain from scratch in one session.** The new `cold-start` skill sequences eight phases ranked by information density times ease: existing markdown / Obsidian (Tier 1) → Google Contacts → Google Calendar (90-day lookback) → Gmail (smart sample) → conversation exports (ChatGPT / Claude) → X / Twitter archive → file archives (Dropbox / Drive / local) → meeting transcripts (Circleback / Otter / Fireflies). Each phase is independently valuable; stop after any phase and resume from `~/.gbrain/cold-start-state.json` later. Trigger with "cold start", "fill my brain", or "what should I import first".
+
+**Setup auto-launches cold-start (Phase J).** After `gbrain doctor` passes, the setup skill no longer ends with "next steps: read the docs." It asks "Ready to populate your brain?" and transitions directly into cold-start. Decline once and it is deferred to `~/.gbrain/cold-start-state.json` with a `deferred` flag. Invoke later with the same trigger phrase.
+
+**Choice-gate pattern is now a documented convention.** `skills/ask-user/SKILL.md` codifies the "present 2-4 options, stop, wait" pattern that cold-start uses at every phase boundary. Platform-agnostic across Telegram inline buttons, Discord, CLI numbered options, and agent-native clarify tools.
+
+### How it works under the hood
+
+Cold-start is an orchestration skill, not a CLI command. The phase ordering ranks by information density times ease: existing markdown delivers the most pages per minute (already structured, no API), file archives deliver the fewest. Each phase delegates to a recipe (for direct OAuth setups) or to ClawVisor (for credential-vaulted setups). The skill never holds raw OAuth tokens; that posture is encoded at Phase 0. State persists across agent-loop crashes via `~/.gbrain/cold-start-state.json`; the resume protocol picks up at the first phase where `completed: false`.
+
+### Known limitations (will be addressed in follow-ups)
+
+**ClawVisor is currently required for the API-backed phases (Contacts, Calendar, Gmail).** The recipes (`recipes/email-to-brain.md`, `recipes/calendar-to-brain.md`) document a dual A / B pattern with direct-OAuth as Option B. Cold-start's Phase 0 will be relaxed to mirror that pattern in v0.32. If you do not want to use ClawVisor today, skip Phases 2-4 and run Phases 1, 5-8 for offline-only sources.
+
+**Phase-level resume granularity.** A mid-phase failure (e.g., contact 487 of 600) restarts the phase from contact 1. Idempotent slug writes prevent duplicates, but the round-trip cost is real. Per-item resume lands with the `gbrain cold-start` CLI counterpart in v0.32.
+
+### To take advantage of v0.31.10
+
+```bash
+gbrain upgrade
+```
+
+Then ask the agent to "fill my brain" or "cold start" to launch the new orchestration. If you have already run setup, run it again to get the new Phase J handoff, or invoke cold-start directly with the trigger phrase. State files live at `~/.gbrain/cold-start-state.json` and survive restarts.
+
+If you do not want ClawVisor today, run Phases 1 (markdown) and 5-8 (conversations, X, archives, transcripts) directly. Phases 2-4 (Contacts / Calendar / Gmail) will become opt-in to direct OAuth in v0.32.
+
+### For contributors
+
+Cold-start originated as PR #802. The branch shipped three commits including one that flipped ClawVisor from "recommended" to "required for API access." Codex outside-voice review of the v0.31.10 ship plan flagged that as vendor-coupling that prematurely cements ClawVisor as the public contract. The known-limitation above is the bridge: v0.31.10 ships the contributor's posture, v0.32 restores the dual-recipe pattern. Privacy scrub on the merging PR replaced "Hermes Agent" references in the new `ask-user` skill (which conflated the public NousResearch agent with private deployment names) with the canonical "OpenClaw agents" phrasing per CLAUDE.md doctrine.
+
+The version slot is deliberate. v0.31.4 through v0.31.9 are reserved for in-flight work; v0.31.10 was chosen so this user-facing skillpack expansion lands clearly above the patch-train.
+
 ## [0.31.8] - 2026-05-10
 
 **Multi-source brains stop misrouting writes, and `gbrain doctor` finally tells you when it does.**

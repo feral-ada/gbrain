@@ -14,6 +14,7 @@ import { serializeMarkdown } from './core/markdown.ts';
 import { parseGlobalFlags, setCliOptions, getCliOptions } from './core/cli-options.ts';
 import type { CliOptions } from './core/cli-options.ts';
 import { callRemoteTool, RemoteMcpError, unpackToolResult } from './core/mcp-client.ts';
+import { maybePromptForUpgrade } from './core/thin-client-upgrade-prompt.ts';
 import { VERSION } from './version.ts';
 
 // Build CLI name -> operation lookup
@@ -321,7 +322,7 @@ async function runThinClientRouted(
 // command runs normally. Banner is observability, not load-bearing.
 // ============================================================================
 
-interface BrainIdentity {
+export interface BrainIdentity {
   version: string;
   engine: 'postgres' | 'pglite';
   page_count: number;
@@ -342,7 +343,7 @@ export function _clearIdentityCacheForTest(): void {
   identityCache.clear();
 }
 
-function bannerSuppressed(cliOpts: CliOptions): boolean {
+export function bannerSuppressed(cliOpts: CliOptions): boolean {
   if (cliOpts.quiet) return true;
   if (process.env.GBRAIN_NO_BANNER === '1') return true;
   // Non-TTY default is suppressed (clean pipes); explicit env-flag overrides.
@@ -391,6 +392,9 @@ async function printIdentityBannerBestEffort(
   const cached = identityCache.get(mcpUrl);
   if (cached && Date.now() - cached.cached_at_ms < IDENTITY_TTL_MS) {
     process.stderr.write(formatBanner(mcpUrl, cached.identity) + '\n');
+    // v0.31.11: detect remote-version drift, prompt user to upgrade.
+    // bannerIsSuppressed=false here — the early return above guaranteed it.
+    await maybePromptForUpgrade(cfg, cached.identity, cliOpts, false);
     return;
   }
 
@@ -400,6 +404,8 @@ async function printIdentityBannerBestEffort(
     const id = await fetchIdentity(cfg, signal);
     identityCache.set(mcpUrl, { identity: id, cached_at_ms: Date.now() });
     process.stderr.write(formatBanner(mcpUrl, id) + '\n');
+    // v0.31.11: detect remote-version drift, prompt user to upgrade.
+    await maybePromptForUpgrade(cfg, id, cliOpts, false);
   } catch {
     // Swallow. Banner suppressed; main command continues. The CDX-4
     // hardened callRemoteTool will surface the same error class on the
