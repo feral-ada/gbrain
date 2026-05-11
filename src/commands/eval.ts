@@ -45,6 +45,14 @@ export async function runEvalCommand(engine: BrainEngine, args: string[]): Promi
     const { runEvalCrossModal } = await import('./eval-cross-modal.ts');
     process.exit(await runEvalCrossModal(args.slice(1)));
   }
+  if (sub === 'code-retrieval') {
+    // v0.34 pre-w0 — code-retrieval baseline / gate harness. Needs a brain
+    // for the baseline (BaselineStrategy calls hybridSearch); --compare
+    // mode reads JSON only but the engine is already connected by this
+    // dispatcher.
+    const { runEvalCodeRetrieval } = await import('./eval-code-retrieval.ts');
+    return runEvalCodeRetrieval(engine, args.slice(1));
+  }
 
   const opts = parseArgs(args);
 
