@@ -2,6 +2,75 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.31.11] - 2026-05-10
+
+**Thin-client gbrain notices when the remote brain has upgraded and offers to bring you along.**
+
+If you're running `gbrain` against a remote `gbrain serve --http` host (the thin-client install from v0.31.1), each command now compares your local CLI version against the remote brain. When the remote has a newer minor or major release, you get a one-line prompt: `Upgrade local CLI now? [Y/n]`. Press Enter, the upgrade runs, the binary advances, your command re-prompts you to retype. Patch drift stays silent. Sticky decline per remote+version so you don't get re-asked every command after saying no. `gbrain remote doctor` surfaces the same drift as a warn-level check for quiet operators and CI.
+
+### What you can now do
+
+**Stop running stale binaries against a fresh brain.** Before this release, a thin-client install at v0.31.4 talking to a v0.32.0 brain would silently use the older protocol surface until the user noticed something was broken. The drift was invisible. Now the banner that already prints `[thin-client → host · brain: ... · v0.32.0]` follows up with an interactive upgrade prompt when local lags remote.
+
+**Decline once, stay declined.** If you press `n`, the prompt remembers your answer for that exact remote+version combination in `~/.gbrain/upgrade-prompt-state.json`. Subsequent commands are silent. When the remote bumps again, you get fresh prompts because the version key changed. Independent answers per remote brain (`work` vs `home`) via mcp_url-scoped state.
+
+**See drift in `gbrain remote doctor` even in non-TTY contexts.** The new `thin_client_upgrade_drift` check fires `warn` when minor/major drift is detected, with a fix hint pointing at `gbrain upgrade`. If a prior in-process upgrade attempt failed (state file shows `last_response: failed` for the same remote version), the hint pivots to the manual install URL so you don't loop on a broken binary.
+
+**Concurrent OpenClaw subagents don't fight over the TTY.** One advisory lockfile (`~/.gbrain/upgrade-prompt.lock`) gates the prompt. If two subagents both detect drift at the same instant, one prompts and the rest silently no-op. Stale-lock reclaim after 60s handles the case where a prompting process died mid-question.
+
+**Ctrl-C escapes the prompt cleanly.** A prompt-scoped SIGINT handler installs around the read and removes after, so pressing Ctrl-C exits 130 (the standard `network/aborted` code) instead of being swallowed by the outer dispatcher's AbortController-only handler.
+
+### Numbers that matter
+
+| Failure mode | Before v0.31.11 | After v0.31.11 |
+|---|---|---|
+| Local v0.31.4, remote v0.32.0 (minor drift) | No signal; user runs stale CLI until something breaks | Banner + interactive prompt; one Enter to upgrade |
+| User declines, runs `gbrain query` again | Re-prompted on every command | Sticky decline per (mcp_url, remote_version) |
+| `gbrain upgrade` runs but doesn't advance the binary (catch-and-print path) | Silent loop on broken binary | State=failed, exit 1, doctor hint pivots to manual install URL |
+| Two OpenClaw subagents both detect drift | Interleaved prompts on same TTY, both read each other's keystrokes | One prompts, others no-op via advisory lockfile |
+| Quiet/non-TTY/CI run with drift | No signal | `gbrain remote doctor` warns with fix hint |
+| Ctrl-C during the prompt | Swallowed (outer SIGINT handler installed already) | Exits 130 cleanly |
+| Stdin EOF mid-prompt (terminal closes, /dev/null piped past TTY check) | Hangs forever on `stdin.once('data')` | Resolves to null after 5min timeout; orchestrator treats as silent decline, no state write |
+
+### What this means for your workflow
+
+If you've been running `gbrain init --mcp-only` thin-client installs across a few machines, this closes the last "why is my brain confused?" failure mode: the answer was always "your local CLI is six releases behind the brain." Now the CLI tells you. The prompt fires at most once per command per (remote, version) and stays out of the way for quiet/non-TTY runs. CI sees the drift in `gbrain remote doctor`.
+
+## To take advantage of v0.31.11
+
+`gbrain upgrade` should land this automatically. If you're already on v0.31.11 the first time a remote brain you talk to bumps past you, you'll see the prompt. Nothing to configure.
+
+1. **Verify the doctor check is wired:**
+   ```bash
+   gbrain remote doctor --json | jq '.checks[] | select(.name == "thin_client_upgrade_drift")'
+   ```
+   You should see either `status: "ok"` (local equals remote) or `status: "warn"` (drift detected, fix hint included).
+
+2. **State file lives at `~/.gbrain/upgrade-prompt-state.json`.** It's keyed by mcp_url so multiple remote brains have isolated decline history. Delete the file to reset all answers.
+
+3. **Lockfile lives at `~/.gbrain/upgrade-prompt.lock`.** If a prompt died without cleaning up, the next invocation reclaims after 60s of stale mtime.
+
+4. **If any step fails or the prompt fires when it shouldn't,** please file an issue:
+   https://github.com/garrytan/gbrain/issues with the output of `gbrain remote doctor --json` and the contents of `~/.gbrain/upgrade-prompt-state.json` if it exists.
+
+### Itemized changes
+
+#### Added
+- `src/core/thin-client-upgrade-prompt.ts` — `maybePromptForUpgrade` orchestrator with full DI seams for tests. Lockfile gating (`acquirePromptLock` with stale-reclaim >60s mtime), atomic state-file IO via tmp+rename, per-entry shape validator that drops malformed entries while preserving valid siblings. Pure `decideAction` returns `prompt` or `noop` based on TTY gates, banner-suppressed, sticky decline, sticky yes, prior-failed re-prompt, and the D8 patch-drift-silent rule. `verifyUpgradeAdvanced` (D5) re-reads `gbrain --version` from a fresh subprocess to detect catch-and-print upgrade paths that return 0 without advancing the binary. Prompt-scoped SIGINT handler exits 130 cleanly.
+- `src/core/cli-util.ts` — `promptLineStderr(prompt, {timeoutMs})` sibling to `promptLine`. Resolves to `string` on stdin data, `null` on stdin EOF or after the 5-minute default timeout. Never rejects. Listener cleanup is idempotent via a `settled` guard.
+- `src/core/doctor-remote.ts` — `runUpgradeDriftCheck(config)` new check `thin_client_upgrade_drift`. Returns ok+inconclusive on network error (informational; the earlier `mcp_smoke` check covers the genuinely-unreachable case). Returns ok on local≥remote OR patch drift. Returns warn on minor/major drift with a fix hint that pivots to the manual install URL if a prior `gbrain upgrade` is recorded as `failed` for the same remote version.
+- `src/cli.ts` — exported `bannerSuppressed` + `BrainIdentity`; wired `maybePromptForUpgrade` into both banner code paths (cache hit and cache miss). Banner-suppressed early return guarantees `bannerIsSuppressed=false` at the call site.
+
+#### Changed
+- `PromptReader` type now returns `Promise<string | null>` to accommodate EOF/timeout. Orchestrator handles null as silent decline with no state write (a transient stdin closure must not poison the per-version sticky-decline gate).
+
+#### Tests
+- 63 new tests across `test/thin-client-upgrade-prompt.test.ts` (50 cases: safeCompare, driftLevel, state-file IO including atomic-write and corrupt-JSON fallthrough, every decision-matrix row, lockfile acquire/EEXIST/stale-reclaim, orchestrator yes/no/advanced/not-advanced/threw/null-from-EOF, SIGINT install/remove lifecycle including cleanup-on-throw, malformed-entry filtering preserves valid siblings, empty-key dropped) and `test/doctor-remote.test.ts` (5 new cases for `runUpgradeDriftCheck`: unreachable host returns ok+inconclusive, major drift no prior state shows auto-upgrade hint, major drift with prior_failed shows manual install hint, prior_failed for older version does NOT pivot stale, local equals remote returns ok). 100% pass.
+- Test fixture in `test/doctor-remote.test.ts` extended to dispatch JSON-RPC `tools/call` by tool name via per-test `mcpToolResults` map.
+
+#### For contributors
+- The `_setVerifierForTest`, `_setPromptReaderForTest`, `_setUpgradeRunnerForTest` injection seams in `thin-client-upgrade-prompt.ts` follow the same pattern as `_clearIdentityCacheForTest` in `src/cli.ts` so tests can drive the orchestrator end-to-end without spawning subprocesses or touching the user's PATH.
+
 ## [0.31.10] - 2026-05-10
 
 **Setup hands you a real bootstrap, not an empty brain. New `cold-start` skill sequences day-1 imports across markdown, contacts, calendar, email, conversations, X, archives, and meeting transcripts. New `ask-user` choice-gate pattern. Phase J in `setup` auto-launches cold-start when verification passes.**
